@@ -62,7 +62,7 @@ powershell -ExecutionPolicy Bypass -File .\extensions\model-status\install.ps1
 
 ### 方式 B：上传 zip
 
-在「设置 → 插件 → 添加插件」中上传 `model-status-v2.1.0.zip`（本目录下）。上传后刷新页面，必要时点「重新扫描」。
+在「设置 → 插件 → 添加插件」中上传 `model-status-v2.1.1.zip`（本目录下）。上传后刷新页面，必要时点「重新扫描」。
 
 ### 方式 C：手动安装
 
@@ -202,12 +202,13 @@ node extensions/model-status/test.mjs
 自测不联网，覆盖来源目录、Statuspage / RSS / Atom / Google Cloud 解析、基线建立、事件去重、
 组件筛选、通知文案截断等纯逻辑。
 
-## 更新记录（v2.1.0）
+## 更新记录（v2.1.1）
 
 - 设置页修复：自定义来源区域改为独立表单布局，窄屏 / 长帮助文案不再把左侧文字挤成竖排；
 - 新增模型工具 `model_status_query`（action=status/list/events），模型可主动查询指定厂商的整体状态、组件、进行中故障与最近事件；
 - 后端新增 `/api/model-status/query`，支持按厂商 id / 名称 / 关键词模糊匹配来源，结果带缓存，避免模型重复追问时反复访问状态页；
 - 硅基流动 `status.siliconflow.cn`（Better Stack 托管）在当前网络下 TLS 握手失败、页面无法访问，暂时移除内置来源，等官方恢复后可自定义添加；
+- 面板顶部新增「后端 vX / 面板 vY」版本徽标：安装新版后如果仍看不到新布局或看不到「面板 v2.1.1」，说明浏览器还在用旧前端模块，请关闭设置浮层并 Ctrl+F5 强制刷新。
 - 查询结果会自动走现有代理、SSRF 保护与纯文本截断，不写状态、不发渠道消息。
 
 ## 更新记录（v2.0.1）

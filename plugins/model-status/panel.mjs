@@ -32,6 +32,8 @@ import {
   switchButton,
 } from './ui.mjs'
 
+export const PANEL_VERSION = '2.1.1'
+
 const CATEGORY_ORDER = ['llm', 'coding', 'image', 'audio', 'infra', 'custom']
 
 function sourceSort(a, b) {
@@ -322,7 +324,8 @@ export function renderModelStatusPanel(container, helpers = {}) {
         <div class="ms-desc">为每个渠道订阅厂商状态页；模型 API / 网页服务出现故障、恢复或组件状态变化时推送到群。首次检查只建立基线，不会补发历史故障。</div>
         <div class="ms-status">
           ${badge(state.bridgeMissing ? '后端桥未加载' : '后端桥已连接', { tone: state.bridgeMissing ? 'red' : 'green' })}
-          ${badge(`v${escapeHtml(state.status?.version || '2.0.0')}`, { tone: 'gray' })}
+          ${badge(`后端 v${escapeHtml(state.status?.version || '?')}`, { tone: 'gray' })}
+          ${badge(`面板 v${PANEL_VERSION}`, { tone: 'purple' })}
           ${badge(`轮询 ${Math.round((Number(config.pollIntervalMs) || 120000) / 1000)}s`, { tone: 'blue' })}
           ${badge(`监控 ${Array.isArray(stats.activeSourceIds) ? stats.activeSourceIds.length : 0} 个来源`, { tone: 'gray' })}
           ${badge(`待投递 ${Number(stats.pendingNotifications) || 0}`, { tone: Number(stats.pendingNotifications) ? 'orange' : 'gray' })}
