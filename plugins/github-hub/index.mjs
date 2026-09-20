@@ -13,7 +13,7 @@
  * 的 bridge.mjs 完成后端，Token 不进入前端。
  */
 export const name = 'github-hub'
-export const version = '2.0.0'
+export const version = '2.0.1'
 export const scope = 'both'
 export const displayName = 'GitHub 助手'
 export const description = 'GitHub 仓库订阅推送 · 链接项目卡片预览 · LLM 只读分析并回复 Issue（独立扩展）。'
@@ -409,6 +409,43 @@ export function apply(ctx) {
     }
   }
 
+  /**
+   * 渠道通知的作用域上下文。
+   * 通知只带 channelId，这里必须通过渠道注册表反查它绑定的角色；否则
+   * 「设置 → 插件启用」里按角色关闭后，从渠道发来的通知会绕过范围检查。
+   */
+  const notificationScopeContext = notification => {
+    const channelId = String(notification?.target?.channelId || '')
+    const found = channelId ? findChannelById(channelId) : null
+    return {
+      conversationId: String(found?.channel?.meta?.conversationId || ''),
+      channelId,
+      // 渠道注册表还没同步完时，用通知里保存的 roleId 兜底，避免误判。
+      roleId: String(found?.channel?.meta?.roleId || notification?.target?.roleId || ''),
+      // 是否已经拿到足够信息判定范围；没有任何渠道 / 角色信息时交给投递阶段
+      // 找到渠道后再判断，避免启动同步窗口里误把通知丢掉。
+      resolved: !!found || !!notification?.target?.roleId,
+    }
+  }
+
+  const notificationScopeAllows = notification => {
+    const context = notificationScopeContext(notification)
+    if (!context.resolved) return true
+    return centralScopeAllows(context)
+  }
+
+  const notificationIdOf = notification => String(notification?.id || '')
+  const canceledNotificationIds = new Set()
+  const markNotificationCanceled = id => {
+    const key = String(id || '')
+    if (!key) return
+    canceledNotificationIds.add(key)
+    if (canceledNotificationIds.size > 1000) {
+      const oldest = canceledNotificationIds.values().next().value
+      if (oldest) canceledNotificationIds.delete(oldest)
+    }
+  }
+
   const ensureConversation = found => {
     const { tab, channel } = found
     const channelBase = getChannelBase()
@@ -454,8 +491,12 @@ export function apply(ctx) {
   }
 
   const canDeliverChannels = () => {
-    if (globalThis.__NIANFENG_SERVER_AGENT__ === true) return true
     const api = getApi()
+    if (!api) return false
+    // 后端健康检查尚未完成时 supports('server-agent') 一定为 false，浏览器会误以为
+    // 该由自己投递，和服务端代聊 Worker 抢同一条通知。先等后端“已连接”再决定。
+    if (typeof api.configured === 'function' && api.configured() !== true) return false
+    if (globalThis.__NIANFENG_SERVER_AGENT__ === true) return true
     return !api?.supports?.('server-agent')
   }
 
@@ -506,6 +547,12 @@ export function apply(ctx) {
 
   const deliverNotification = async notification => {
     const key = deliveryKeyOf(notification)
+    /* 订阅在投递前被取消：不要写会话，也不要重试。 */
+    if (canceledNotificationIds.has(notificationIdOf(notification))) {
+      queuedNotificationKeys.delete(key)
+      await ackNotification(notification, true, '订阅已取消，通知已丢弃')
+      return
+    }
     if (deliveredNotificationKeys.has(key)) {
       queuedNotificationKeys.delete(key)
       await ackNotification(notification, true)
@@ -516,11 +563,25 @@ export function apply(ctx) {
     let succeeded = false
     try {
       const target = notification.target || {}
-      // 渠道通知只按 GitHub 面板里的「渠道订阅」开关投递；「插件启用」范围
-      // 只控制工具和链接预览，避免用户明明订阅了某渠道却因为默认策略被静默吞掉。
       const found = findChannelById(target.channelId)
       if (!found) {
         await ackNotification(notification, false, `渠道不存在（${target.channelId || '未知'}）`)
+        return
+      }
+      const channel = found.channel
+      const scopeContext = {
+        conversationId: String(channel.meta?.conversationId || ''),
+        channelId: String(target.channelId || ''),
+        roleId: String(channel.meta?.roleId || target.roleId || ''),
+      }
+      // 「设置 → 插件启用 → GitHub 助手」是绝对开关：对该角色 / 渠道关闭后，
+      // 渠道通知也不能再冒出来。先判断范围再创建会话，避免被禁用的角色平白
+      // 多出一个空会话；直接 ACK 成功（而不是失败重试），避免禁用后仍然每
+      // 30 秒重试一次，或者重新启用时补发一堆旧通知。
+      if (!centralScopeAllows(scopeContext)) {
+        succeeded = true
+        await ackNotification(notification, true, '插件未在当前角色 / 渠道启用，通知已丢弃')
+        ctx.logger.debug(`[github-hub] 通知已丢弃：插件未在 ${channel.name || channel.id} 的角色 / 渠道启用`)
         return
       }
       const conversationId = ensureConversation(found)
@@ -528,7 +589,7 @@ export function apply(ctx) {
         await ackNotification(notification, false, '无法创建渠道会话')
         return
       }
-      const channel = found.channel
+      scopeContext.conversationId = conversationId
       const channelBase = getChannelBase()
       const canOutbound = channelBase?.hasOutbound ? channelBase.hasOutbound(channel.type) : true
 
@@ -578,6 +639,16 @@ export function apply(ctx) {
         } else {
           images.push(card)
         }
+      }
+      if (canceledNotificationIds.has(notificationIdOf(notification))) {
+        succeeded = true
+        await ackNotification(notification, true, '订阅已取消，通知已丢弃')
+        return
+      }
+      if (!centralScopeAllows(scopeContext)) {
+        succeeded = true
+        await ackNotification(notification, true, '插件未在当前角色 / 渠道启用，通知已丢弃')
+        return
       }
       const message = messages.add(conversationId, {
         role: 'assistant',
@@ -633,6 +704,18 @@ export function apply(ctx) {
     const items = Array.isArray(list) ? list : []
     for (const notification of items) {
       if (!notification?.id || notification.delivered === true) continue
+      if (canceledNotificationIds.has(notificationIdOf(notification))) {
+        markNotificationDelivered(deliveryKeyOf(notification))
+        ackNotification(notification, true, '订阅已取消，通知已丢弃')
+        continue
+      }
+      // 「设置 → 插件启用」关闭的角色 / 渠道：不做本地系统通知，也不写渠道消息；
+      // 直接 ACK 丢弃，避免禁用后还在后台每 30 秒重试。
+      if (!notificationScopeAllows(notification)) {
+        markNotificationDelivered(deliveryKeyOf(notification))
+        ackNotification(notification, true, '插件未在当前角色 / 渠道启用，通知已丢弃')
+        continue
+      }
       showLocalNotification(notification)
       if (!canDeliverChannels()) {
         releaseClaimedNotifications([notification]).catch(() => {})
@@ -659,17 +742,29 @@ export function apply(ctx) {
     return []
   }
 
-  const flushPending = async () => {
-    // 不能投递的运行时（例如服务端代聊已接管）不要认领通知，只做本地展示。
-    const claimed = canDeliverChannels() ? await claimPending() : null
-    if (claimed !== null) {
-      handleNotifications(claimed)
-      return
+  const withDeliveryMutex = async task => {
+    const locks = typeof navigator !== 'undefined' ? navigator?.locks : null
+    if (typeof locks?.request !== 'function') return task()
+    try {
+      return await locks.request('github-hub:delivery', { mode: 'exclusive' }, task)
+    } catch (_) {
+      // Web Locks 不可用 / 被策略禁用时不影响主流程。
+      return task()
     }
-    const result = await bridgeCall('GET', '/github-hub/notifications?pending=1')
-    if (result?.ok === false) return
-    handleNotifications(result.notifications || [])
   }
+
+  const flushPending = () =>
+    withDeliveryMutex(async () => {
+      // 不能投递的运行时（例如服务端代聊已接管）不要认领通知，只做本地展示。
+      const claimed = canDeliverChannels() ? await claimPending() : null
+      if (claimed !== null) {
+        handleNotifications(claimed)
+        return
+      }
+      const result = await bridgeCall('GET', '/github-hub/notifications?pending=1')
+      if (result?.ok === false) return
+      handleNotifications(result.notifications || [])
+    })
 
   /* ------------------------------------------------------------------ */
   /* SSE 与轮询                                                          */
@@ -701,7 +796,13 @@ export function apply(ctx) {
         // SSE 只用于尽快弹本地系统通知；渠道消息统一走 claim 接口投递，
         // 避免与其它页面 / 服务端代聊同时拿到同一条通知后各发一次。
         if (payload.kind === 'notifications' && Array.isArray(payload.notifications)) {
-          for (const notification of payload.notifications) showLocalNotification(notification)
+          for (const notification of payload.notifications) {
+            // 被「设置 → 插件启用」关闭的角色 / 渠道连系统通知都不展示。
+            if (notificationScopeAllows(notification)) showLocalNotification(notification)
+          }
+        }
+        if (payload.kind === 'canceled' && Array.isArray(payload.ids)) {
+          for (const id of payload.ids) markNotificationCanceled(id)
         }
         if (payload.kind === 'config') refreshBridgeSettings().catch(() => {})
         flushPending().catch(() => {})
@@ -1036,6 +1137,7 @@ export function apply(ctx) {
     request: (method, path, body) => bridgeCall(method, path, body, 45000),
     getChannels: getChannelList,
     getRoles: getRoleList,
+    allowsScope: context => centralScopeAllows(context),
     toast: null,
     openUrl: openExternal,
     confirm: confirmDialog,
@@ -1082,3 +1184,4 @@ export function apply(ctx) {
 
   ctx.logger.info('GitHub 助手已启用：仓库订阅推送 · 链接卡片预览 · Issue 只读分析工具')
 }
+

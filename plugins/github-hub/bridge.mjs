@@ -60,7 +60,7 @@ import {
 import { renderEventCard } from './lib/card.mjs'
 
 export const name = 'github-hub-bridge'
-export const version = '2.0.0'
+export const version = '2.0.1'
 export const displayName = 'GitHub 助手后端桥'
 export const description = '订阅仓库事件推送、GitHub 只读检索与 LLM Issue 分析回复。'
 export const author = '念风扩展'
@@ -945,7 +945,47 @@ export function apply(ctx) {
 
   const alreadyNotified = key => Boolean(key && state.notifiedKeys[key])
 
+  const PLUGIN_SCOPE_KEY = 'plugin.scope'
+  const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object || {}, key)
+
+  /**
+   * 读取「设置 → 插件启用 → GitHub 助手」的共享配置。
+   * plugin-scope 是前端服务，后端桥拿不到它的解析结果；但共享偏好会同步到
+   * settings.preferences['plugin.scope']，通知里又带着渠道 / 角色 id，因此后端
+   * 也能在生成与认领通知时做同一套绝对开关判断，避免代聊 Worker 或旧订阅
+   * 绕过前端范围检查继续往已被关闭的角色 / 渠道发消息。
+   */
+  const sharedPluginScopeAllows = ({ channelId = '', roleId = '' } = {}) => {
+    let entry = null
+    try {
+      const all = settings.get()?.preferences?.[PLUGIN_SCOPE_KEY]
+      entry = isObject(all) && isObject(all['github-hub']) ? all['github-hub'] : null
+    } catch (_) {
+      entry = null
+    }
+    if (!entry) return true
+    const channels = isObject(entry.channels) ? entry.channels : {}
+    const roles = isObject(entry.roles) ? entry.roles : {}
+    const channelKey = String(channelId || '')
+    if (channelKey && hasOwn(channels, channelKey)) return channels[channelKey] !== false
+    const roleKey = String(roleId || '')
+    if (roleKey && hasOwn(roles, roleKey)) return roles[roleKey] !== false
+    // 旧订阅 / 旧接口可能没有把 roleId 写进通知；这时无法在桥内反推角色，
+    // 按“允许”处理，交给前端 plugin-scope（能从渠道注册表反推角色）最终拦截。
+    // 但如果配置里连角色覆盖都没有、默认又是关闭，就没有歧义了，直接拒绝。
+    if (entry.default === 'none') {
+      if (roleKey) return false
+      if (!Object.keys(roles).length) return false
+    }
+    return true
+  }
+
   const makeNotification = ({ event, channel, text, cardSvg = '', kind = '' }) => {
+    const channelId = String(channel?.channelId || channel?.id || '')
+    const roleId = String(channel?.roleId || channel?.meta?.roleId || '')
+    // 「设置 → 插件启用」是绝对开关：关闭 GitHub 助手后不再生成渠道通知，
+    // 避免用户取消 / 关闭后仍被历史事件或测试消息追着推送。
+    if (!sharedPluginScopeAllows({ channelId, roleId })) return null
     const seq = (Number(state.seq) || 0) + 1
     state.seq = seq
     const notification = {
@@ -955,9 +995,11 @@ export function apply(ctx) {
       kind: kind || event?.kind || 'event',
       event: compactEvent(event || {}),
       target: {
-        channelId: String(channel.channelId || channel.id || ''),
-        channelName: String(channel.name || ''),
-        channelType: String(channel.type || ''),
+        channelId,
+        /* 用于后端再次校验「插件启用」范围；旧通知可能为空。 */
+        roleId,
+        channelName: String(channel?.name || ''),
+        channelType: String(channel?.type || ''),
         text: String(text || ''),
         cardSvg: String(cardSvg || ''),
         kind: kind || event?.kind || 'event',
@@ -1029,6 +1071,40 @@ export function apply(ctx) {
   }
 
   /**
+   * 用户取消订阅 / 移除仓库 / 关闭渠道后，立即作废该渠道尚未投递的通知。
+   * 重点覆盖“测试通知点了之后又取消订阅”的情况，避免测试消息继续追着旧角色发。
+   */
+  const cancelPendingNotificationsForChannel = (channelId, { repo = '', all = false, reason = '' } = {}) => {
+    const targetChannel = String(channelId || '')
+    if (!targetChannel) return 0
+    const wantedRepo = normalizeRepoFullName(repo || '')
+    if (!all && !wantedRepo) return 0
+    const now = Date.now()
+    const ids = []
+    for (const notification of state.notifications) {
+      if (!notification || notification.delivered === true) continue
+      if (String(notification.target?.channelId || '') !== targetChannel) continue
+      if (!all && String(notification.event?.repo || '') !== wantedRepo) continue
+      notification.delivered = true
+      notification.deliveredAt = now
+      notification.canceledAt = now
+      notification.lastError = String(reason || '订阅已变更，待投递通知已取消').slice(0, 500)
+      notification.claimedAt = 0
+      notification.claimedBy = ''
+      ids.push(String(notification.id || ''))
+    }
+    if (ids.length) {
+      schedulePersist()
+      try {
+        hub.broadcast('github-hub:event', { kind: 'canceled', ids, at: now })
+      } catch (error) {
+        ctx.logger.debug(`[github-hub] 广播通知取消失败：${error?.message || error}`)
+      }
+    }
+    return ids.length
+  }
+
+  /**
    * 原子认领一批待投递通知。浏览器与服务端代聊同时启动、重复轮询或重复桥实例
    * 都只能有一个运行时拿到同一条通知，从源头保证“一条通知只外发一次”。
    */
@@ -1043,6 +1119,12 @@ export function apply(ctx) {
     for (const notification of list) {
       if (claimed.length >= limit) break
       if (wanted.size && !wanted.has(String(notification.id || ''))) continue
+      /* 生成后被「设置 → 插件启用」关闭的角色 / 渠道：直接作废，避免重试刷屏。 */
+      if (!sharedPluginScopeAllows({ channelId: notification.target?.channelId, roleId: notification.target?.roleId })) {
+        expireNotification(notification, now, '插件未在当前角色 / 渠道启用，已丢弃')
+        expired += 1
+        continue
+      }
       /* 正在投递中的通知不要因为“生成时间早”而被过期掉。 */
       if (notificationClaimedByOther(notification, owner)) continue
       if (notificationExpired(notification, now)) {
@@ -1116,15 +1198,16 @@ export function apply(ctx) {
         continue
       }
       const channelType = String(subscription.type || subscription.channelType || '').toLowerCase()
-      created.push(
-        makeNotification({
-          event,
-          channel: { ...subscription, channelId },
-          text,
-          cardSvg: SVG_IMAGE_UNSUPPORTED.has(channelType) ? '' : cardSvg,
-          kind,
-        }),
-      )
+      const notification = makeNotification({
+        event,
+        channel: { ...subscription, channelId },
+        text,
+        cardSvg: SVG_IMAGE_UNSUPPORTED.has(channelType) ? '' : cardSvg,
+        kind,
+      })
+      // makeNotification 返回 null 表示该角色 / 渠道已在「设置 → 插件启用」里关闭。
+      if (!notification) continue
+      created.push(notification)
       rememberNotifiedKey(notificationKey)
     }
     if (created.length) {
@@ -2126,6 +2209,7 @@ export function apply(ctx) {
       if (!channelId) throw errorWithStatus(400, '缺少渠道 id')
       const body = (await httpApi.readBody(req)) || {}
       const existing = isObject(state.subscriptions[channelId]) ? state.subscriptions[channelId] : { repos: {} }
+      const previousRepos = Object.keys(existing.repos || {})
       const repos = {}
       for (const item of Array.isArray(body.repos) ? body.repos : []) {
         const repo = normalizeRepoFullName(item?.repo)
@@ -2143,6 +2227,7 @@ export function apply(ctx) {
         type: String(body.type || existing.type || ''),
         tab: String(body.tab || existing.tab || ''),
         groupName: String(body.groupName || existing.groupName || ''),
+        roleId: String(body.roleId || existing.roleId || '').trim(),
         enabled: body.enabled !== false && Object.keys(repos).length > 0,
         repos,
         updatedAt: Date.now(),
@@ -2152,14 +2237,29 @@ export function apply(ctx) {
       } else {
         state.subscriptions[channelId] = subscription
       }
+      const stored = state.subscriptions[channelId] || null
+      if (!stored) {
+        // 整个渠道的订阅被取消：测试通知 / 未投递事件通知一并作废。
+        cancelPendingNotificationsForChannel(channelId, { all: true, reason: '渠道订阅已取消，待投递通知已丢弃' })
+      } else {
+        for (const repo of previousRepos) {
+          if (repos[repo]) continue
+          cancelPendingNotificationsForChannel(channelId, { repo, reason: `已取消订阅 ${repo}，相关待投递通知已丢弃` })
+        }
+        if (stored.enabled === false) {
+          cancelPendingNotificationsForChannel(channelId, { all: true, reason: '渠道订阅已停用，待投递通知已丢弃' })
+        }
+      }
       rebuildMonitors()
       schedulePersist()
-      httpApi.sendJson(res, 200, { ok: true, subscription: state.subscriptions[channelId] || subscription, monitoredRepos: monitoredRepos() })
+      httpApi.sendJson(res, 200, { ok: true, subscription: stored || subscription, monitoredRepos: monitoredRepos() })
     }),
 
     safeRoute('DELETE', '/api/github-hub/subscriptions/:channelId', async (req, res, params) => {
       const channelId = String(params.channelId || '').trim()
       if (state.subscriptions[channelId]) delete state.subscriptions[channelId]
+      // 删除订阅后所有未投递通知立即作废，避免旧角色 / 已卸载渠道继续收到测试或历史推送。
+      cancelPendingNotificationsForChannel(channelId, { all: true, reason: '渠道订阅已删除，待投递通知已丢弃' })
       rebuildMonitors()
       schedulePersist()
       httpApi.sendJson(res, 200, { ok: true, monitoredRepos: monitoredRepos() })
@@ -2263,6 +2363,12 @@ export function apply(ctx) {
         .filter(item => {
           if (!pendingOnly) return true
           if (item.delivered === true) return false
+          /* 被「设置 → 插件启用」关闭的角色 / 渠道：从待投递列表里直接作废。 */
+          if (!sharedPluginScopeAllows({ channelId: item.target?.channelId, roleId: item.target?.roleId })) {
+            expireNotification(item, now, '插件未在当前角色 / 渠道启用，已丢弃')
+            expired += 1
+            return false
+          }
           if (notificationClaimedByOther(item, '')) return false
           if (notificationExpired(item, now)) {
             expireNotification(item, now)
@@ -2331,6 +2437,8 @@ export function apply(ctx) {
       const channelId = String(body.channelId || '').trim()
       if (!channelId) throw errorWithStatus(400, '请提供 channelId')
       const subscription = isObject(state.subscriptions[channelId]) ? state.subscriptions[channelId] : {}
+      // 测试通知也要带上角色 id，后端与前端才能用同一份「插件启用」范围做最终拦截。
+      const roleId = String(body.roleId || subscription.roleId || subscription.meta?.roleId || '').trim()
       const repo =
         normalizeRepoFullName(body.repo || '') ||
         Object.keys(subscription.repos || {})[0] ||
@@ -2354,11 +2462,17 @@ export function apply(ctx) {
       const text = [`🧪 ${repo} 测试通知`, '', '如果你能收到这条消息，说明该渠道的 GitHub 订阅与投递链路正常。', '', `🔗 ${event.url}`].join('\n')
       const notification = makeNotification({
         event,
-        channel: { channelId, name: String(body.name || subscription.name || channelId), type: String(body.type || subscription.type || '') },
+        channel: {
+          channelId,
+          roleId,
+          name: String(body.name || subscription.name || channelId),
+          type: String(body.type || subscription.type || ''),
+        },
         text,
         cardSvg: state.config.channels.sendCard ? renderEventCard(eventToCardData(event)) : '',
         kind: 'test',
       })
+      if (!notification) throw errorWithStatus(403, 'GitHub 助手未在当前角色 / 渠道启用，测试通知已拦截。')
       trimNotifications()
       schedulePersist()
       broadcastNotifications([notification])
@@ -2454,3 +2568,4 @@ export function apply(ctx) {
 
   ctx.logger.info('GitHub 助手后端桥就绪（/api/github-hub/*）')
 }
+

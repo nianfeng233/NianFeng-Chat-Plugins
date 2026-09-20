@@ -49,7 +49,7 @@ const safeJson = value => {
 }
 
 export function renderGithubHubPanel(container, helpers = {}) {
-  const { request, getChannels, getRoles: getRoleList, toast, openUrl, confirm: confirmDialog } = helpers
+  const { request, getChannels, getRoles: getRoleList, allowsScope, toast, openUrl, confirm: confirmDialog } = helpers
   const state = {
     status: null,
     subscriptions: {},
@@ -162,6 +162,9 @@ export function renderGithubHubPanel(container, helpers = {}) {
       type: channel.type || '',
       tab: channel.tab || '',
       groupName: channel.groupName || '',
+      // 后端桥无法访问渠道注册表；把角色 id 一并保存，通知生成 / 认领时才能
+      // 按「设置 → 插件启用」的角色范围做最终拦截。
+      roleId: String(channel.meta?.roleId || ''),
       repos: repos.map(item => ({ repo: item.repo, events: normalizeEventFilters(item.events) })),
     }
     const result = await api('PUT', `/github-hub/subscriptions/${encodeURIComponent(channelId)}`, payload)
@@ -438,7 +441,7 @@ export function renderGithubHubPanel(container, helpers = {}) {
       card(
         row(
           '限制启用的角色 / 渠道',
-          '默认关闭：所有角色都能加载 GitHub 工具，消息里的 GitHub 链接也会自动预览。开启后只有勾选的“角色”或“渠道”命中时才加载，其它会话完全看不到这些工具，能有效避免误触发、工具递归调用；渠道通知仍按下方订阅开关执行。',
+          '默认关闭：所有角色都能加载 GitHub 工具，消息里的 GitHub 链接也会自动预览。开启后只有勾选的“角色”或“渠道”命中时才加载，其它会话完全看不到这些工具，能有效避免误触发、工具递归调用；渠道通知也按同一份启用范围执行。',
           switchButton('仅勾选的角色 / 渠道', 'scope.enabled', enabled),
         ) +
           `<div class="ghh-scope-options" data-scope-options style="display:${enabled ? 'block' : 'none'}">
@@ -675,7 +678,7 @@ export function renderGithubHubPanel(container, helpers = {}) {
         card(
           row(
             '按角色 / 渠道启用 GitHub 助手',
-            '已接入本体统一入口：打开「设置 → 插件启用」，选择 GitHub 助手后可按角色或单个渠道开启 / 关闭。关闭后该角色 / 渠道的模型连 GitHub 工具定义都看不到，链接预览也一起停用；渠道通知仍按下方「渠道订阅」开关投递。',
+            '已接入本体统一入口：打开「设置 → 插件启用」，选择 GitHub 助手后可按角色或单个渠道开启 / 关闭。关闭后该角色 / 渠道的模型看不到 GitHub 工具定义，链接预览会停用，渠道通知（含测试通知）也会一并丢弃；重新启用前不会补发历史通知。',
             '<span class="ghh-dim">设置 → 插件启用</span>',
           ),
         ),
@@ -735,8 +738,13 @@ export function renderGithubHubPanel(container, helpers = {}) {
     }
     if (action === 'test-notification') {
       const channel = findChannel(channelId)
+      const roleId = String(channel?.meta?.roleId || '')
+      if (typeof allowsScope === 'function' && allowsScope({ channelId, roleId }) === false) {
+        return notify('warn', 'GitHub 助手在当前角色 / 渠道已被关闭，请先到「设置 → 插件启用」开启后再测试。')
+      }
       const result = await api('POST', '/github-hub/test-notification', {
         channelId,
+        roleId,
         name: channel?.name || channelId,
         type: channel?.type || '',
       })
