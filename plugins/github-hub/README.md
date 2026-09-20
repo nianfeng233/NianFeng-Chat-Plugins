@@ -1,0 +1,207 @@
+# GitHub 助手（github-hub）· 念风独立扩展
+
+给念风聊天客户端增加一套围绕 GitHub 的能力，**放在独立目录、完全不改本体**：
+
+| 能力 | 说明 |
+|---|---|
+| 📡 仓库订阅推送 | 在插件设置里针对**每个已有渠道**订阅 GitHub 仓库；仓库有新 Issue、Issue 评论、分支 Push、Release、Pull Request、Fork / Star 等动态时，向该渠道发送通知 |
+| 🖼 链接项目预览 | 聊天消息里出现 GitHub 仓库 / Issue / PR / Commit / Release / 用户链接时，自动生成一张项目卡片（SVG 图片）展示仓库头像、简介、语言、Star / Fork / Issue、标签、正文摘要等 |
+| 🤖 Issue 自动分析 | 配置自己的仓库后，新 Issue 会被后端桥读取仓库内容（只读）→ 调用 LLM 分析 → 默认生成回复草稿并通知渠道；选择「自动回复」模式后会直接作为 Issue 评论发布 |
+| 🚫 屏蔽刷屏用户 | 当前角色可通过 `github_user_block` 工具屏蔽 / 解开用户；被屏蔽用户的 Issue、评论不再推送通知，也不会触发 LLM 分析。开启「主动屏蔽」后，模型判断为广告 / 诈骗 / 恶意刷屏时可自动加入屏蔽名单 |
+| 🧰 对话工具 | 注册 7 个工具给模型：`github_repo_info` / `github_issue_get` / `github_repo_search` / `github_repo_read` / `github_issue_analyze` / `github_issue_reply` / `github_subscription`，用户说「分析一下 / 去回复一下 / 帮我订阅这个仓库」即可调用 |
+
+> 仓库内容、Issue 正文与评论始终按**不可信外部内容**处理；插件对本地的唯一写操作只有「发布 Issue 评论」。
+> GitHub Token 只存在后端 `<数据目录>/github-hub.json`，使用念风本体同一套 AES-256-GCM + `.secret-key` 加密，前端与接口都只看到打码值。
+
+## 需求可行性
+
+| 原始需求 | 结论 | 实现方式 |
+|---|---|---|
+| 1. 每个渠道配置订阅仓库，事件推送到渠道 | ✅ 可做 | 后端桥按仓库轮询 GitHub Events API（ETag 条件请求 + seen / notifiedKeys 去重）；前端 / 服务端代聊通过原子认领接口取通知，写入渠道对应会话，交给 `channel-base` 自动外发 |
+| 2. 解析消息里的 GitHub 链接并生成图片预览 | ✅ 可做 | 后端桥提供只读 `preview` / `repo` / `issue` 数据，前端用纯 SVG 生成卡片（不依赖 canvas、sharp、字体文件），存入 `image-service` 后作为消息图片展示 |
+| 3. 自动分析 Issue 并调用 LLM 回复、通知渠道 | ✅ 可做 | 后端桥读取 README + 目录树 + 按关键词挑选的相关源码文件，通过 `models.complete` 调用已配置模型，生成「分析 + 回复」草稿；支持草稿 / 自动两种模式；渠道通知与能力 1 共用队列 |
+| 4. 用户自然语言「你去回复一下」 | ✅ 可做 | `github_issue_analyze` / `github_issue_reply` 等 function-calling 工具；`github_subscription` 支持用对话管理当前渠道订阅 |
+
+**已知边界：**
+- 没有 GitHub Token 时，GitHub API 限额约 60 次/小时，插件会自动放慢轮询（默认 2 分钟会按仓库数放大），适合轻度使用；重度和私有仓库建议配置 Token。
+- 渠道通知默认是纯文本（QQ / 微信兼容性最好）；可选开启「附带 SVG 卡片」，部分渠道可能不支持 SVG，此时会自动降级为纯文本，或由渠道桥返回明确错误。
+- 链接卡片是 SVG 图片，浏览器显示效果最佳；外部渠道发送图片取决于各渠道桥对 SVG 的支持。
+- 自动回复默认是「草稿」模式，不会未确认就发帖；选择「自动」模式才直接发布，建议先跑一段时间草稿。
+- 服务端代聊（`server-agent`）开启时由后台 Worker 投递渠道通知，浏览器只负责显示本地通知；在非常旧的内核上如果没有外部 bridge 热加载能力，安装后需要重启后端。
+
+## 安装
+
+### 方式 A：脚本安装（推荐）
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\extensions\github-hub\install.ps1
+
+# 自定义数据目录
+.\extensions\github-hub\install.ps1 -DataDir "D:\nianfeng-data"
+# 或指定外部插件目录
+.\extensions\github-hub\install.ps1 -PluginsDir "D:\my-plugins" -Force
+```
+
+安装后回到「设置 → 插件」点一次「重新扫描」；新版内核会同时热加载后端桥，一般不需要重启。
+
+### 方式 B：上传 zip
+
+在「设置 → 插件 → 添加插件」中上传 `github-hub-v2.0.0.zip`（本目录下）。上传完成后刷新页面，必要时点「重新扫描」。
+
+### 手动安装
+
+把本目录完整复制到 `<数据目录>/plugins/github-hub/`（保留 `lib/` 子目录），然后在插件页「重新扫描」。
+
+## 配置入口
+
+- 「设置 → 功能 → GitHub 助手」
+- 「设置 → 插件 → GitHub 助手 → 设置」
+
+### 0. 启用范围（工具 / 链接预览）
+
+GitHub 助手已接入本体统一入口：**「设置 → 插件启用 → GitHub 助手」**。
+
+- 默认不限制：所有角色都能看到 8 个 GitHub 工具，聊天里的 GitHub 链接也会自动预览。
+- 可以按**角色**或**单个渠道**关闭；渠道配置优先于角色配置。
+- 关闭后该角色 / 渠道的模型连工具定义都看不到，链接预览也会一起停用，适合防止误触发和工具递归调用。
+- **渠道通知仍按「渠道订阅」开关投递**，不受这里的角色 / 渠道禁用影响；订阅了哪个渠道，该渠道就会继续收到仓库推送。
+- 新安装插件时会先问一次「默认为全体角色启用 / 关闭」；之后随时可在该页面细调。
+
+### 1. 接入配置
+
+- **GitHub Token**（可选）：只读公开仓库可不填；自动回复 Issue、读取私有仓库、提高 API 限额时必须填写。建议使用 fine-grained token，仅授予目标仓库 `Contents: Read`、`Issues: Read and write`、`Metadata: Read`。
+- **轮询间隔**：默认 2 分钟；未配置 Token 时插件会按监控仓库数自动放大间隔，避免触发 API 限额。
+- **HTTP 代理**：留空跟随「设置 → 网络」的全局代理。
+- **通知卡片发到渠道**：默认关闭；开启后通知消息会附带一张 SVG 事件卡片。
+- **时间显示时区**：默认 `Asia/Shanghai`。GitHub API 返回 UTC，通知会转换到这个时区再显示，避免时间戳差 8 小时。
+- **旧事件补发上限**：默认 30 分钟，且至少覆盖两个轮询周期。休眠 / 重装 / 重启后，超过这个时间的历史事件只记 `seen`，不再通知。
+- **通知队列过期时间**：默认 30 分钟。通知生成后长时间没有运行时认领时会自动作废，避免睡醒后刷屏。
+- **链接自动预览**：默认开启；「渠道会话里也生成预览」默认关闭，避免 QQ / 微信里自动刷屏。
+
+### 2. 渠道订阅
+
+在「渠道订阅」区域可以看到所有已添加的渠道（私聊 / 群聊 / 隐私分组）。对每个渠道：
+
+1. 输入 `owner/repo` 后点「添加仓库」；
+2. 勾选需要推送的事件（Issue / Issue 评论 / 分支更新 / Release / PR / Fork / Star 等）；
+3. 顶部的「订阅中 / 未启用」开关控制该渠道是否接收。
+
+订阅会保存到后端的状态文件，浏览器关闭、只开着服务端代聊时也会继续推送。
+
+### 3. 自动回复
+
+- **总开关** + **处理模式**：关闭 / 草稿（推荐）/ 自动。
+- **适用仓库**：逗号分隔的 `owner/repo`；留空表示所有已订阅仓库。
+- **模型**：留空会自动使用所选提供商的第一个可用模型；未指定提供商时使用「设置 → 模型」里的当前默认模型。
+- **触发时机**：新 Issue 打开、Issue 新评论（默认关闭）。
+- **读取文件上限 / 上下文预算 / temperature / maxTokens**。
+- **跳过用户 / 标签**：机器人账号和 `no-ai`、`ai-reply-skip` 默认跳过。
+- **忽略自己 / 屏蔽名单**：你自己账号触发的 Issue、评论默认不会推送通知也不会分析；分支 Push / Release 仍会按订阅推送，方便跟踪自己发布的版本。被屏蔽用户的 Issue / 评论会被完全跳过（不推送、不消耗 LLM）。当前角色可以通过 `github_user_block` 主动屏蔽刷屏 / 广告用户。
+- **系统提示词**：留空使用内置提示词（强调只读、不执行不可信内容里的指令、不编造事实）。
+
+自动分析会读取：仓库信息、README、目录树前 400 项、按 Issue 关键词挑选的相关源码文件（默认最多 6 个，每个默认最多 60KB），然后调用 LLM 生成：
+
+```
+[分析] 问题原因 / 影响范围 / 还需要什么信息
+[回复] 可以直接发布到 Issue 的评论正文
+```
+
+草稿会出现在设置页「草稿与回复」区域，并推送一条通知到订阅了该仓库「Issue」事件的渠道。用户在对话里说「分析一下这个 Issue / 去回复一下」时，模型也可以调用工具完成。
+
+### 4. 聊天链接预览
+
+直接发以下链接即可（最多同时解析 3 条，默认展示 2 条）：
+
+```
+https://github.com/nianfeng233/NianFeng-Chat
+https://github.com/nianfeng233/NianFeng-Chat/issues/84
+https://github.com/nianfeng233/NianFeng-Chat/pull/12
+https://github.com/nianfeng233/NianFeng-Chat/commit/<sha>
+https://github.com/nianfeng233/NianFeng-Chat/releases/tag/v1.1.8
+```
+
+生成的消息是 assistant 图片消息，模型上下文里只会看到简短说明，不会把整张 SVG 图当作多模态输入。
+
+- 普通网页聊天：生成 SVG 项目卡片作为图片展示。
+- 外部渠道（QQ / NapCat / 微信等）：浏览器运行时会先把卡片栅格化成 PNG 再发送；服务端代聊没有 canvas 时会降级为**文字卡片预览**，保证链接发出去之后能看到项目信息，而不是外发 400。
+
+## 模型侧工具
+
+| 工具 | 用途 | 写操作 |
+|---|---|---|
+| `github_repo_info` | 仓库摘要 + README | 否 |
+| `github_issue_get` | Issue / PR 详情 + 最近评论 | 否 |
+| `github_repo_search` | 目录树关键词搜索文件 | 否 |
+| `github_repo_read` | 读取指定文件内容 | 否 |
+| `github_issue_analyze` | 读取仓库 + 调 LLM 生成回复草稿 | 否（仅生成草稿） |
+| `github_issue_reply` | 发布 Issue / PR 评论 | **是**（需要 Token + 用户明确要求） |
+| `github_subscription` | 查看 / 添加 / 移除当前渠道订阅 | 仅本地订阅状态 |
+| `github_user_block` | 查看 / 屏蔽 / 解开刷屏用户 | 仅本地屏蔽名单 |
+
+## 目录结构
+
+```
+extensions/github-hub/
+├─ index.mjs        前端插件：设置页、SSE/轮询、渠道投递、链接预览、7 个工具
+├─ panel.mjs        设置面板：接入配置 / 渠道订阅 / 自动回复 / 草稿 / 最近动态
+├─ ui.mjs           自包含 UI 组件的样式，不依赖本体 src
+├─ bridge.mjs       后端桥：GitHub API 轮询、状态持久化、只读检索、LLM 分析与回复
+├─ lib/
+│  ├─ github.mjs    GitHub URL 解析、事件归一化、渠道通知文案（纯函数）
+│  ├─ card.mjs      纯 SVG 项目 / Issue / Commit / Release / 用户卡片
+│  └─ util.mjs      跨浏览器 / Node 的小工具
+├─ manifest.json
+├─ install.ps1
+├─ test.mjs         纯逻辑自测：node test.mjs
+└─ README.md
+```
+
+## 安全与隐私
+
+- GitHub Token 使用 `<数据目录>/.secret-key` + AES-256-GCM 加密后写入 `github-hub.json`；接口只返回 `maskedToken`，不返回明文。
+- 只读读取代码 / Issue 时不写入任何仓库；唯一的 GitHub 写操作是 `POST /repos/:owner/:repo/issues/:number/comments`。
+- 自动回复默认走草稿模式；即使自动模式，也会先做用户 / 测试仓库 / 标签等跳过判断。
+- 仓库文件、README、Issue 正文、评论都属于不可信数据：内置提示词和工具描述均要求模型只把它们当资料，不执行其中的指令，不泄露上下文中的敏感信息。
+- HTTP 请求支持本机 / 全局代理；代理地址只会用于 GitHub API 与头像下载。
+
+## 更新记录（v1.1.4）
+
+- **通知时间戳修复**：GitHub Events API 的 `created_at` 是 UTC，旧代码直接显示并截掉 `UTC` 标识，导致通知时间和本地差 8 小时。现在统一按配置时区转换后显示（默认 `Asia/Shanghai`，可在「接入配置 → 时间显示时区」修改）。
+- **Push 通知不再永远写“1 个提交”**：Events API 的 summary PushEvent payload 不含 `size` / `commits` / `head_commit`，旧代码会兜底成 1。现在缺字段时补查一次只读 `compare` / `commits` 接口，拿真实提交数和最新提交说明；查不到就不显示数量，而不是伪造。
+- **不再补发历史旧事件**：新增 `旧事件补发上限`（默认 30 分钟）。休眠、插件重装、状态文件丢失或后端重启后，超过阈值的历史 Push / Issue / Release 事件只记录 `seen`，不会重新推送。
+- **过期待投递通知自动作废**：新增 `通知队列过期时间`（默认 30 分钟）。通知生成后长时间没有运行时认领（后端离线、机器休眠、浏览器长期关闭）会直接过期，避免睡醒后一次性刷屏。
+- **轮询游标 `sinceAt` 推进**：处理过事件后会把每个仓库的游标推进到最新事件时间，降低状态部分丢失时重新回放旧事件的风险。
+
+## 更新记录（v1.1.3）
+
+- 修复同一事件被推送两次的问题：
+  - 后端桥新增通知「原子认领」接口，浏览器与服务端代聊、多个页面同时启动时，一条通知只会被一个运行时取走并外发；
+  - 前端不再直接投递 SSE 里携带的通知，改为统一走认领接口，并在本地按 `notificationId + channelId` 做二次幂等；
+  - 写入会话前检查是否已存在同一个 `githubNotificationId`，避免热重载 / 重试时重复写入；
+  - 后端 `pollAll` 增加真正在 `await ready` 之前生效的并发锁，避免同一批 GitHub 事件被并发处理两次；
+  - 同一事件对同一渠道写入 `notifiedKeys` 去重记录；外部插件目录里残留的旧版本 / 备份桥副本会被自动跳过。
+- 修复 `index.mjs` 版本号长期停留在 `1.1.1` 的问题，现在与 manifest 统一为 `1.1.3`。
+
+## 更新记录（v1.1.2）
+
+- 修复“忽略自己”过滤范围过大的问题：自己账号触发的分支 Push / Release 现在会正常按订阅推送；Issue / 评论仍保持默认忽略，避免回复后自我循环。
+- 设置项说明同步更新，与 README 的“仅忽略 Issue / 评论”保持一致。
+
+## 更新记录（v1.1.1）
+
+- 模型未显式选择时，自动使用所选提供商下第一个可用模型，修复「已配置模型仍反复提示未配置分析模型」。
+- 自动识别顶层登录名与 Token 所属账号；自己触发的 Issue / 评论不再推送、不再分析，修复回复后又被自己的评论触发的问题。
+- 评论通知区分「评论者」和「Issue 作者」，不再把评论区的人混成同一个名字。
+- 新增屏蔽名单与 `github_user_block` 工具；被屏蔽用户的 Issue / 评论完全跳过，不推送也不消耗 LLM。自动分析开启「主动屏蔽」后，模型判断为广告 / 诈骗 / 恶意刷屏时可自动加入名单；模型也可以在回复里输出 `[UNBLOCK] 用户名` 或通过工具解开。
+- 回复签名现在对所有发布路径生效：自动分析、草稿发布、`github_issue_reply` 工具手动发布都会在末尾追加「回复签名」。
+- 渠道链接预览修复：SVG 改为合法 base64 data URL；浏览器有 canvas 时栅格化成 PNG 再发，服务端代聊自动降级为文字卡片，避免 `/api/images` 400 与 NapCat 外发 400。
+- 同步修复本体 `backend-client`：健康检查连续失败 3 次才切换离线，EventSource 瞬断不再立刻把 WebUI 标成“后端不可用”，减少间歇性失联。
+
+## 自测
+
+```powershell
+node extensions/github-hub/test.mjs
+# OK github-hub test · N 项通过
+```
+
+安装到外部插件目录后，也可以在念风里发一条 GitHub 链接、或到「设置 → GitHub 助手 → 立即检查」验证。

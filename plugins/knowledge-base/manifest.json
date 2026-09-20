@@ -1,0 +1,28 @@
+{
+  "id": "knowledge-base",
+  "name": "knowledge-base",
+  "displayName": "知识库",
+  "version": "2.0.0",
+  "author": "念风扩展",
+  "description": "模型自维护的本地知识库：多级目录、标签、时间戳、历史版本，关键词 + 可选向量的本地混合检索；提供管理页面浏览条目全文与历史。",
+  "entry": "./index.mjs",
+  "backend": "./bridge.mjs",
+  "icon": "📚",
+  "color": "#8b5cf6",
+  "type": "extension",
+  "core": false,
+  "permissions": [],
+  "depends": {
+    "tool-registry": "^1.0.0"
+  },
+  "optionalDepends": {
+    "backend-client": ">=1.0.0"
+  },
+  "provides": [],
+  "distribution": {
+    "directory": "extensions/knowledge-base",
+    "zip": "knowledge-base-v2.0.0.zip",
+    "placement": "外部插件：<数据目录>/plugins/knowledge-base/（本扩展不进入主仓库构建）"
+  },
+  "scope": "both"
+}

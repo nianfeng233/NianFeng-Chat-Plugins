@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "updatedAt": "2026-09-20T05:59:41.613Z",
+  "repos": [
+    {
+      "name": "念风官方插件仓库",
+      "url": "https://github.com/nianfeng233/NianFeng-Chat-Plugins",
+      "branch": "main",
+      "manifest": "market.json",
+      "official": true
+    }
+  ]
+}

@@ -1,0 +1,33 @@
+{
+  "id": "social-bridge",
+  "name": "social-bridge",
+  "displayName": "邮箱",
+  "version": "2.0.1",
+  "author": "念风扩展",
+  "description": "只保留 IMAP / SMTP 邮箱能力：邮箱工具 + 配置面板；修复中文邮件正文乱码。",
+  "entry": "./index.mjs",
+  "backend": "./bridge.mjs",
+  "icon": "📧",
+  "color": "#0ea5e9",
+  "type": "extension",
+  "core": false,
+  "permissions": [
+    "network"
+  ],
+  "depends": {
+    "tool-registry": "^1.0.0",
+    "plugin-manager": ">=1.0.0"
+  },
+  "optionalDepends": {
+    "backend-client": ">=1.0.0",
+    "settings-container": "^1.0.0",
+    "toast-host": ">=1.0.0"
+  },
+  "provides": [],
+  "distribution": {
+    "directory": "extensions/social-bridge",
+    "placement": "外部插件：<数据目录>/plugins/social-bridge/（邮箱功能不再依赖联网访问插件）",
+    "zip": "social-bridge-v2.0.1.zip"
+  },
+  "scope": "both"
+}

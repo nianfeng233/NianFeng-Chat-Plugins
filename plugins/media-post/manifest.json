@@ -1,0 +1,41 @@
+{
+  "id": "media-post",
+  "name": "media-post",
+  "displayName": "点歌台 · 媒体放映机",
+  "version": "2.1.0",
+  "author": "念风扩展",
+  "description": "B站 / 抖音视频与图文插件：点歌发 QQ 语音（NapCat record / QQ 官方机器人 SILK）、发视频 / 图文，其它渠道降级为文件 / 链接；依赖「联网访问」提供搜索、Cookie 与抖音图文解析。",
+  "entry": "./index.mjs",
+  "backend": "./bridge.mjs",
+  "icon": "🎬",
+  "color": "#f43f5e",
+  "type": "extension",
+  "core": false,
+  "permissions": [
+    "network"
+  ],
+  "depends": {
+    "web-access": ">=1.1.0",
+    "tool-registry": "^1.0.0",
+    "plugin-manager": ">=1.0.0",
+    "session-service": ">=2.0.0",
+    "chat-store": "^1.0.0",
+    "event-bus": "*"
+  },
+  "optionalDepends": {
+    "backend-client": ">=1.0.0",
+    "chat-permissions": "^1.0.0",
+    "config": "^1.0.0",
+    "napcat": "^1.0.0",
+    "qqbot": ">=1.5.0",
+    "settings-container": "^1.0.0",
+    "toast-host": ">=1.0.0"
+  },
+  "provides": [],
+  "distribution": {
+    "directory": "extensions/media-post",
+    "zip": "media-post-v2.1.0.zip",
+    "placement": "外部插件：<数据目录>/plugins/media-post/（需同时安装并启用「联网访问」web-access v1.1.0+）"
+  },
+  "scope": "both"
+}
