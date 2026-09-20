@@ -3,7 +3,7 @@
   "name": "念风官方插件仓库",
   "repo": "https://github.com/nianfeng233/NianFeng-Chat-Plugins",
   "branch": "main",
-  "updatedAt": "2026-09-20T11:58:15.772Z",
+  "updatedAt": "2026-09-20T11:59:11.468Z",
   "plugins": [
     {
       "id": "github-hub",
@@ -124,11 +124,12 @@
       "minAppVersion": "2.0.0",
       "hashType": "content-sha256",
       "sha256": "0a6e2cf3c57a3c201359957a246fbae8491b887b1a4a5935b6bddedb09368d83",
-      "updatedAt": "2026-09-20T11:58:15.761Z",
+      "updatedAt": "2026-09-20T11:59:11.468Z",
       "repo": "https://github.com/nianfeng233/NianFeng-Chat-Plugins",
       "branch": "main",
       "homepage": "https://github.com/nianfeng233/NianFeng-Chat-Plugins/tree/main/plugins/model-status",
-      "release": null
+      "release": null,
+      "commit": "0c943d379a97b7798906088e32f067c76757d9bf"
     },
     {
       "id": "napcat-group-guard",
