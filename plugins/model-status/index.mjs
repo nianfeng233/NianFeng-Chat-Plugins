@@ -13,7 +13,7 @@
  *     轮询 Statuspage API / RSS / Google Cloud incidents，检测状态变化。
  */
 export const name = 'model-status'
-export const version = '2.0.0'
+export const version = '2.0.1'
 export const scope = 'both'
 export const displayName = '模型状态订阅'
 export const description = '订阅 DeepSeek、Claude、GPT、Gemini、Grok 等模型厂商状态页，故障 / 恢复 / 组件状态变化推送到渠道。'

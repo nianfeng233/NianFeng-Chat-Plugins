@@ -209,6 +209,16 @@ export function collectStatusPageEvents({ source, parsed, previous, endpoint = '
   return { seed, events, snapshot: next }
 }
 
+function feedContentHash(item) {
+  const text = `${item?.title || ''}\n${item?.body || ''}\n${item?.url || ''}`
+  let hash = 2166136261
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+  return (hash >>> 0).toString(16)
+}
+
 /** RSS / Atom -> 事件 + 新快照。 */
 export function collectFeedEvents({ source, feed, previous, endpoint = '', maxSeen = 500 }) {
   const seed = !snapshotHasData(previous, 'rss')
@@ -219,30 +229,63 @@ export function collectFeedEvents({ source, feed, previous, endpoint = '', maxSe
   for (const item of feed.items || []) {
     const key = String(item.id || item.url || item.title || '').trim()
     if (!key) continue
-    nextSeen[key] = Number(previousSeen[key]) || Number(item.publishedAt) || Date.now()
-    if (seed || previousSeen[key]) continue
-    events.push(
-      baseEvent(source, {
-        id: `${source.id}:feed:${key}`,
-        eventType: 'feed',
-        kind: 'feed',
-        title: item.title || '状态页新动态',
-        at: Number(item.publishedAt) || Date.now(),
-        statusLabel: item.categories?.[0] || '',
-        body: item.body || '',
-        url: item.url || '',
-        components: [],
-      }),
-    )
+    const hash = feedContentHash(item)
+    const previousEntry = previousSeen[key]
+    const previousAt = typeof previousEntry === 'number' ? previousEntry : Number(previousEntry?.at) || 0
+    const previousHash = typeof previousEntry === 'object' && previousEntry ? String(previousEntry.hash || '') : ''
+    nextSeen[key] = {
+      at: previousAt || Number(item.publishedAt) || Date.now(),
+      hash,
+    }
+    if (seed) continue
+
+    // 新条目：按发布 / 抓取时间推送。
+    if (!previousAt && !previousHash) {
+      events.push(
+        baseEvent(source, {
+          id: `${source.id}:feed:${key}:${hash}`,
+          eventType: 'feed',
+          kind: 'feed',
+          title: item.title || '状态页新动态',
+          at: Number(item.publishedAt) || Date.now(),
+          statusLabel: item.categories?.[0] || '',
+          body: item.body || '',
+          url: item.url || '',
+          components: [],
+        }),
+      )
+      continue
+    }
+
+    // 同一条 guid 内容更新（RSS 源常见：issue 在原条目上追加更新）：
+    // 用内容哈希识别，at 记为本次检查时间，避免历史旧条目被 maxEventAge 吞掉。
+    if (previousHash && previousHash !== hash) {
+      events.push(
+        baseEvent(source, {
+          id: `${source.id}:feed:update:${key}:${hash}`,
+          eventType: 'feed',
+          kind: 'feed',
+          title: item.title || '状态页动态更新',
+          at: Date.now(),
+          statusLabel: item.categories?.[0] || '更新',
+          body: item.body || '',
+          url: item.url || '',
+          components: [],
+        }),
+      )
+    }
   }
 
-  // 也保留上一次快照中的历史 guid，防止 RSS 源短暂缺失某些条目后重复推送。
-  for (const [key, at] of Object.entries(previousSeen)) {
-    if (!nextSeen[key]) nextSeen[key] = Number(at) || Date.now()
+  // 也保留上一次快照中的历史 guid 与内容哈希，防止 RSS 源短暂缺失某些条目后重复推送。
+  for (const [key, entry] of Object.entries(previousSeen)) {
+    if (nextSeen[key]) continue
+    const at = typeof entry === 'number' ? Number(entry) || 0 : Number(entry?.at) || 0
+    const hash = typeof entry === 'object' && entry ? String(entry.hash || '') : ''
+    nextSeen[key] = { at: at || Date.now(), hash }
   }
 
   const trimmed = Object.entries(nextSeen)
-    .sort((a, b) => Number(b[1]) - Number(a[1]))
+    .sort((a, b) => (Number(b[1]?.at) || 0) - (Number(a[1]?.at) || 0))
     .slice(0, Math.max(1, Number(maxSeen) || 500))
   const seen = Object.fromEntries(trimmed)
 

@@ -192,6 +192,7 @@ export function requestPinned(input, { addresses, method = 'GET', headers = {}, 
         headers,
         timeout: timeoutMs,
         signal: AbortSignal.timeout(timeoutMs),
+        agent: false,
         lookup(hostname, options, callback) {
           const wanted = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '')
           if (wanted !== servername.toLowerCase()) {

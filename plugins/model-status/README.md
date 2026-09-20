@@ -14,34 +14,33 @@
 
 | 厂商 | 默认地址 | 说明 |
 |---|---|---|
-| DeepSeek | `status.deepseek.com` | 官方 |
-| Claude（Anthropic） | `status.anthropic.com` | 官方 |
-| GPT（OpenAI） | `status.openai.com` | 官方 |
-| Grok（xAI） | `status.x.ai` | 官方 |
+| DeepSeek | `status.deepseek.com/history.rss` | 官方 RSS 动态（页面不是 Statuspage API） |
+| Claude（Anthropic） | `status.anthropic.com` | 官方 Statuspage |
+| GPT（OpenAI） | `status.openai.com` | 官方 Statuspage |
+| Grok（xAI） | `status.x.ai/feed.xml` | 官方 RSS 动态（页面不是 Statuspage API） |
 | Gemini（Google） | `status.cloud.google.com/incidents.json` | 默认只筛 Gemini / Generative Language 相关产品，可在订阅里改关键词或选具体产品 |
-| Mistral AI | `status.mistral.ai` | |
-| Groq | `status.groq.com` | |
-| Together AI | `status.together.ai` | |
-| Fireworks AI | `status.fireworks.ai` | |
-| Replicate | `status.replicate.com` | |
-| Cohere | `status.cohere.com` | |
-| Hugging Face | `status.huggingface.co` | |
-| OpenRouter | `status.openrouter.ai` | |
-| Llama API（Meta） | `status.llama.com` | |
-| Perplexity | `status.perplexity.ai` | 地址未在全部网络环境验证 |
-| Kimi（Moonshot） | `status.moonshot.cn` | 地址未在全部网络环境验证，失败请改用自定义来源 |
-| MiniMax | `status.minimax.io` | 地址未在全部网络环境验证 |
-| Z.ai / 智谱 | `status.z.ai` | 地址未在全部网络环境验证 |
-| 硅基流动 | `status.siliconflow.cn` | 地址未在全部网络环境验证 |
-| Cursor | `status.cursor.com` | 编程助手 |
-| Stability AI | `status.stability.ai` | 图像模型 |
-| Fal.ai | `status.fal.ai` | 图像 / 视频模型 |
-| Runway | `status.runwayml.com` | 视频模型 |
-| ElevenLabs | `status.elevenlabs.io` | 语音模型 |
-| Deepgram | `status.deepgram.com` | 语音模型 |
-| AssemblyAI | `status.assemblyai.com` | 语音模型 |
-| Pinecone | `status.pinecone.io` | AI 基础设施 |
-| Modal | `status.modal.com` | AI 基础设施 |
+| Mistral AI | `status.mistral.ai` | Statuspage；部分网络 / 代理出口会被 Cloudflare 403 |
+| Perplexity | `status.perplexity.com/feed.rss` | 官方 RSS 动态 |
+| Groq | `groqstatus.com/feed.rss` | 官方 RSS 动态 |
+| Together AI | `status.together.ai/feed` | 官方 RSS 动态 |
+| Fireworks AI | `status.fireworks.ai` | Statuspage |
+| Cohere | `status.cohere.com` | Statuspage |
+| Hugging Face | `status.huggingface.co` | 自动识别官方 RSS |
+| OpenRouter | `status.openrouter.ai` | Statuspage；部分网络 / 代理出口会被 Cloudflare 403 |
+| Llama API（Meta） | `status.llama.com` | Statuspage；地址可能在部分网络不可达 |
+| Kimi（Moonshot） | `status.moonshot.cn` | Statuspage |
+| MiniMax | `status.minimax.io` | Statuspage |
+| Z.ai / 智谱 | `status.z.ai` | 地址可能在部分网络不可达，失败请改用自定义来源 |
+| 硅基流动 | `status.siliconflow.cn` | 地址可能在部分网络不可达，失败请改用自定义来源 |
+| Cursor | `status.cursor.com` | Statuspage · 编程助手 |
+| Stability AI | `status.stability.ai` | Statuspage · 图像模型 |
+| Fal.ai | `status.fal.ai/history.rss` | 官方 RSS 动态 · 图像 / 视频模型 |
+| Runway | `status.runwayml.com` | Statuspage · 视频模型 |
+| ElevenLabs | `status.elevenlabs.io` | Statuspage · 语音模型 |
+| Deepgram | `status.deepgram.com` | Statuspage · 语音模型 |
+| AssemblyAI | `status.assemblyai.com` | Statuspage · 语音模型 |
+| Pinecone | `status.pinecone.io` | Statuspage · AI 基础设施 |
+| Modal | `status.modal.com` | 自动识别官方 RSS · AI 基础设施 |
 
 找不到的厂商可以在设置页「添加自定义来源」，直接填状态页根地址或 RSS 地址：
 auto 会优先尝试对根地址拼接 `/api/v2/summary.json`，再尝试 `/history.rss`，最后读取原地址本身；
@@ -64,7 +63,7 @@ powershell -ExecutionPolicy Bypass -File .\extensions\model-status\install.ps1
 
 ### 方式 B：上传 zip
 
-在「设置 → 插件 → 添加插件」中上传 `model-status-v2.0.0.zip`（本目录下）。上传后刷新页面，必要时点「重新扫描」。
+在「设置 → 插件 → 添加插件」中上传 `model-status-v2.0.1.zip`（本目录下）。上传后刷新页面，必要时点「重新扫描」。
 
 ### 方式 C：手动安装
 
@@ -148,7 +147,7 @@ powershell -ExecutionPolicy Bypass -File .\extensions\model-status\install.ps1
 - Google Cloud 的 incidents.json 包含全部产品事件，默认只筛 `gemini` 关键词，误报 / 漏报时请在渠道订阅里
   修改关键词或选择具体产品；
 - RSS / Atom 只有条目，不提供完整组件状态；需要精确到模型时请优先使用 Statuspage 站点；
-- `status.moonshot.cn` 等未验证地址可能受你所在地区的网络影响；
+- `status.z.ai`、`status.llama.com` 等地址可能在部分地区的网络 / 代理出口不可达，失败时请改用自定义来源；
 - 通知正文是纯文本，兼容 QQ / NapCat / 微信；不会发送图片。
 
 ## 目录结构
@@ -177,15 +176,29 @@ extensions/model-status/
 
 ```powershell
 node extensions/model-status/test.mjs
-# 结果：45/45 项通过
+# 结果：46/46 项通过
 ```
 
 自测不联网，覆盖来源目录、Statuspage / RSS / Atom / Google Cloud 解析、基线建立、事件去重、
 组件筛选、通知文案截断等纯逻辑。
 
+## 更新记录（v2.0.1）
+
+- 修正 HTTP(S) 代理下的 HTTPS 隧道实现：之前与部分代理组合会报
+  `EPROTO packet length too long` / 请求超时，现在统一使用 CONNECT + TLS socket；
+- 补齐代理模式下的 TLS 握手与请求超时，避免网络异常时轮询卡死；
+- RSS 事件检测加入同 guid 内容哈希：像 xAI 这类在原条目上追加更新的 feed 也能推送状态变化；
+- 根据真实状态页验证结果修正内置来源：
+  - DeepSeek 改为官方 `history.rss`（该站不是 Statuspage API）；
+  - xAI / Grok 改为官方 `feed.xml`；
+  - Groq、Perplexity、Together、Fal 改为官方 RSS 地址；
+  - 移除无公开 API / RSS 的 Replicate，避免用户选中后反复失败；
+  - 自动识别候选补充 `/feed`、`/feed.rss`、`/feed.xml` 等常见路径；
+  - Moonshot / MiniMax / Hugging Face / Modal / Runway 等已通过实际状态页验证，标记为官方。
+
 ## 更新记录（v2.0.0）
 
-- 首个版本：内置 20+ 模型 / AI 基础设施厂商状态页；
+- 首个版本：内置模型 / AI 基础设施厂商状态页；
 - 支持每渠道订阅、事件类型开关、具体模型 / 组件筛选与关键词筛选；
 - 支持 Statuspage API、RSS / Atom、Google Cloud incidents.json，自定义来源 auto 识别；
 - 原子 claim 防重复投递、过期通知作废、旧事件补发上限、失败退避、代理与 SSRF 防护；

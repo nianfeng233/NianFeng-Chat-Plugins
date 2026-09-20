@@ -149,6 +149,7 @@ function proxiedRequest(rawUrl, { method = 'GET', headers = {}, proxy = '', time
           path: target.href,
           headers: { ...headers, Host: target.host, ...proxyHeaders },
           timeout: timeoutMs,
+          agent: false,
         },
         async response => {
           try {
@@ -180,6 +181,7 @@ function proxiedRequest(rawUrl, { method = 'GET', headers = {}, proxy = '', time
       path: `${target.hostname}:${target.port || 443}`,
       headers: { Host: `${target.hostname}:${target.port || 443}`, ...proxyHeaders },
       timeout: timeoutMs,
+      agent: false,
     })
     connectRequest.on('timeout', () => {
       connectRequest.destroy()
@@ -197,8 +199,21 @@ function proxiedRequest(rawUrl, { method = 'GET', headers = {}, proxy = '', time
         return
       }
       const tlsSocket = tls.connect({ socket, servername: target.hostname })
-      tlsSocket.once('error', error => fail(new Error(`TLS 连接失败：${error.message}`)))
+      const handshakeTimer = setTimeout(() => {
+        try {
+          tlsSocket.destroy()
+        } catch (_) {
+          /* ignore */
+        }
+        fail(new Error('TLS 握手超时'))
+      }, timeoutMs)
+      handshakeTimer.unref?.()
+      tlsSocket.once('error', error => {
+        clearTimeout(handshakeTimer)
+        fail(new Error(`TLS 连接失败：${error.message}`))
+      })
       tlsSocket.once('secureConnect', () => {
+        clearTimeout(handshakeTimer)
         const request = https.request(
           {
             hostname: target.hostname,
@@ -206,9 +221,10 @@ function proxiedRequest(rawUrl, { method = 'GET', headers = {}, proxy = '', time
             path: `${target.pathname}${target.search}`,
             method,
             headers,
-            socket: tlsSocket,
+            createConnection: () => tlsSocket,
             servername: target.hostname,
             agent: false,
+            timeout: timeoutMs,
           },
           async response => {
             try {
@@ -226,6 +242,7 @@ function proxiedRequest(rawUrl, { method = 'GET', headers = {}, proxy = '', time
             }
           },
         )
+        request.on('timeout', () => request.destroy(new Error('代理请求超时')))
         request.on('error', error => fail(new Error(`代理请求失败：${error.message}`)))
         request.end()
       })
@@ -250,6 +267,7 @@ export async function fetchText(rawUrl, options = {}) {
   const redirectLimit = Math.min(Math.max(Number(maxRedirects) || 0, 0), 8)
   let current = String(rawUrl || '')
   let lastError = null
+  const hopHeaders = { Connection: 'close', ...headers }
 
   for (let hop = 0; hop <= redirectLimit; hop += 1) {
     let result
@@ -258,9 +276,9 @@ export async function fetchText(rawUrl, options = {}) {
         // 代理模式下不再做本地 DNS 解析：目标域名可能只在代理侧可达。
         // 仍保留协议 / 主机名 / 私网字面量检查，避免误访问本机服务。
         assertProxyTargetAllowed(current)
-        result = await proxiedRequest(current, { method: 'GET', headers, proxy, timeoutMs, maxBytes })
+        result = await proxiedRequest(current, { method: 'GET', headers: hopHeaders, proxy, timeoutMs, maxBytes })
       } else {
-        result = await requestOncePinned(current, { method: 'GET', headers, timeoutMs, maxBytes })
+        result = await requestOncePinned(current, { method: 'GET', headers: hopHeaders, timeoutMs, maxBytes })
       }
     } catch (error) {
       lastError = error

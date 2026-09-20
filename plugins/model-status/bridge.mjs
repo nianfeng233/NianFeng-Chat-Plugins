@@ -61,7 +61,7 @@ import {
 } from './lib/detect.mjs'
 
 export const name = 'model-status-bridge'
-export const version = '2.0.0'
+export const version = '2.0.1'
 export const displayName = '模型状态订阅后端桥'
 export const description = '轮询各厂商状态页 / RSS，检测模型服务状态变化并生成渠道通知。'
 export const author = '念风扩展'
@@ -384,6 +384,7 @@ export function apply(ctx) {
       case 'statuspage':
         push(statusPageSummaryUrl(source.url))
         push(statusPageHistoryFeedUrl(source.url))
+        push(`${String(source.url || '').replace(/\/+$/, '')}/feed.xml`)
         break
       case 'rss':
       case 'google-cloud':

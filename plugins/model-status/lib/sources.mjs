@@ -54,8 +54,10 @@ export const BUILTIN_SOURCES = [
     vendor: 'DeepSeek',
     emoji: '🐋',
     color: '#4d6bfe',
-    url: 'https://status.deepseek.com',
-    description: 'DeepSeek API / 网页版服务状态',
+    adapter: 'rss',
+    url: 'https://status.deepseek.com/history.rss',
+    homepage: 'https://status.deepseek.com',
+    description: 'DeepSeek API / 网页版服务状态（官方 RSS 动态）',
   }),
   source('anthropic', 'Claude（Anthropic）', {
     vendor: 'Anthropic',
@@ -75,8 +77,10 @@ export const BUILTIN_SOURCES = [
     vendor: 'xAI',
     emoji: '🚀',
     color: '#111827',
-    url: 'https://status.x.ai',
-    description: 'Grok / xAI API 服务状态',
+    adapter: 'rss',
+    url: 'https://status.x.ai/feed.xml',
+    homepage: 'https://status.x.ai',
+    description: 'Grok / xAI API 服务状态（官方 RSS 动态）',
   }),
   source('gemini', 'Gemini（Google）', {
     vendor: 'Google',
@@ -98,35 +102,35 @@ export const BUILTIN_SOURCES = [
   source('perplexity', 'Perplexity', {
     emoji: '🔎',
     color: '#20808d',
-    url: 'https://status.perplexity.ai',
-    description: 'Perplexity 搜索 / 模型服务状态',
-    confidence: 'community',
+    adapter: 'rss',
+    url: 'https://status.perplexity.com/feed.rss',
+    homepage: 'https://status.perplexity.ai',
+    description: 'Perplexity 搜索 / 模型服务状态（官方 RSS 动态）',
+    confidence: 'official',
   }),
   source('groq', 'Groq', {
     emoji: '⚡',
     color: '#f55036',
-    url: 'https://status.groq.com',
-    description: 'Groq Cloud / LPU 推理服务状态',
+    adapter: 'rss',
+    url: 'https://groqstatus.com/feed.rss',
+    homepage: 'https://status.groq.com',
+    description: 'Groq Cloud / LPU 推理服务状态（官方 RSS 动态）',
+    confidence: 'official',
   }),
   source('together', 'Together AI', {
     emoji: '🧩',
     color: '#0f6fff',
-    url: 'https://status.together.ai',
-    description: 'Together AI 推理 / 微调服务状态',
-    confidence: 'community',
+    adapter: 'rss',
+    url: 'https://status.together.ai/feed',
+    homepage: 'https://status.together.ai',
+    description: 'Together AI 推理 / 微调服务状态（官方 RSS 动态）',
+    confidence: 'official',
   }),
   source('fireworks', 'Fireworks AI', {
     emoji: '🎆',
     color: '#6d28d9',
     url: 'https://status.fireworks.ai',
     description: 'Fireworks AI 推理服务状态',
-    confidence: 'community',
-  }),
-  source('replicate', 'Replicate', {
-    emoji: '🧬',
-    color: '#111111',
-    url: 'https://status.replicate.com',
-    description: 'Replicate 模型托管 / 推理服务状态',
     confidence: 'community',
   }),
   source('cohere', 'Cohere', {
@@ -140,8 +144,8 @@ export const BUILTIN_SOURCES = [
     emoji: '🤗',
     color: '#ffd21e',
     url: 'https://status.huggingface.co',
-    description: 'Hugging Face Hub / Inference 服务状态',
-    confidence: 'community',
+    description: 'Hugging Face Hub / Inference 服务状态（自动识别官方 RSS）',
+    confidence: 'official',
   }),
   source('openrouter', 'OpenRouter', {
     emoji: '🔀',
@@ -163,15 +167,15 @@ export const BUILTIN_SOURCES = [
     emoji: '🌙',
     color: '#111827',
     url: 'https://status.moonshot.cn',
-    description: 'Kimi / Moonshot API 服务状态；地址未在全部网络环境验证，失败时请改用自定义来源',
-    confidence: 'community',
+    description: 'Kimi / Moonshot API 服务状态',
+    confidence: 'official',
   }),
   source('minimax', 'MiniMax', {
     emoji: '🔺',
     color: '#ef4444',
     url: 'https://status.minimax.io',
-    description: 'MiniMax 模型 / API 服务状态；地址未在全部网络环境验证',
-    confidence: 'community',
+    description: 'MiniMax 模型 / API 服务状态',
+    confidence: 'official',
   }),
   source('zai', 'Z.ai / 智谱', {
     vendor: 'Z.ai',
@@ -209,9 +213,11 @@ export const BUILTIN_SOURCES = [
     emoji: '🖌️',
     color: '#ec4899',
     category: 'image',
-    url: 'https://status.fal.ai',
-    description: 'Fal.ai 图像 / 视频模型推理状态',
-    confidence: 'community',
+    adapter: 'rss',
+    url: 'https://status.fal.ai/history.rss',
+    homepage: 'https://status.fal.ai',
+    description: 'Fal.ai 图像 / 视频模型推理状态（官方 RSS 动态）',
+    confidence: 'official',
   }),
   source('runway', 'Runway', {
     emoji: '🎬',
@@ -219,7 +225,7 @@ export const BUILTIN_SOURCES = [
     category: 'image',
     url: 'https://status.runwayml.com',
     description: 'Runway 视频生成服务状态',
-    confidence: 'community',
+    confidence: 'official',
   }),
   source('elevenlabs', 'ElevenLabs', {
     emoji: '🔊',
@@ -258,8 +264,8 @@ export const BUILTIN_SOURCES = [
     color: '#22c55e',
     category: 'infra',
     url: 'https://status.modal.com',
-    description: 'Modal 无服务器 GPU / 推理平台状态',
-    confidence: 'community',
+    description: 'Modal 无服务器 GPU / 推理平台状态（自动识别官方 RSS）',
+    confidence: 'official',
   }),
 ]
 
@@ -368,9 +374,12 @@ export function sourceUrlCandidates(source, previous = null) {
     return out
   }
   const base = raw.replace(/\/+$/, '')
-  // Statuspage 站点：优先 API，再 RSS，最后页面本身。
+  // Statuspage 站点：优先 API；自定义 / 下一代状态页常见 RSS 路径依次兜底。
   push(`${base}/api/v2/summary.json`)
   push(`${base}/history.rss`)
+  push(`${base}/feed`)
+  push(`${base}/feed.rss`)
+  push(`${base}/feed.xml`)
   push(raw)
   return out
 }

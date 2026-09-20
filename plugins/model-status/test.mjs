@@ -236,6 +236,13 @@ const feedSecond = collectFeedEvents({ source: { id: 'rss-example', name: 'Examp
 check('RSS 新增条目会产生事件', feedSecond.events.length === 1 && feedSecond.events[0].kind === 'feed')
 check('RSS 事件正文 / 链接正常', feedSecond.events[0].body.includes('resolved') && feedSecond.events[0].url.includes('/incidents/2'))
 
+const rssUpdated = {
+  ...rssNext,
+  items: rssNext.items.map(item => (item.id === 'incident-1' ? { ...item, body: 'We are now seeing severe latency.' } : item)),
+}
+const feedThird = collectFeedEvents({ source: { id: 'rss-example', name: 'Example' }, feed: rssUpdated, previous: feedSecond.snapshot })
+check('同一 guid 内容更新也会产生事件', feedThird.events.length === 1 && feedThird.events[0].body.includes('severe latency'))
+
 /* ------------------------------------------------------------------ */
 section('5. Google Cloud 解析与检测')
 /* ------------------------------------------------------------------ */
