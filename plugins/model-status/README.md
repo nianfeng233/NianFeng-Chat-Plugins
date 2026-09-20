@@ -31,7 +31,6 @@
 | Kimi（Moonshot） | `status.moonshot.cn` | Statuspage |
 | MiniMax | `status.minimax.io` | Statuspage |
 | Z.ai / 智谱 | `status.z.ai` | 地址可能在部分网络不可达，失败请改用自定义来源 |
-| 硅基流动 | `status.siliconflow.cn` | 地址可能在部分网络不可达，失败请改用自定义来源 |
 | Cursor | `status.cursor.com` | Statuspage · 编程助手 |
 | Stability AI | `status.stability.ai` | Statuspage · 图像模型 |
 | Fal.ai | `status.fal.ai/history.rss` | 官方 RSS 动态 · 图像 / 视频模型 |
@@ -63,7 +62,7 @@ powershell -ExecutionPolicy Bypass -File .\extensions\model-status\install.ps1
 
 ### 方式 B：上传 zip
 
-在「设置 → 插件 → 添加插件」中上传 `model-status-v2.0.1.zip`（本目录下）。上传后刷新页面，必要时点「重新扫描」。
+在「设置 → 插件 → 添加插件」中上传 `model-status-v2.1.0.zip`（本目录下）。上传后刷新页面，必要时点「重新扫描」。
 
 ### 方式 C：手动安装
 
@@ -109,6 +108,26 @@ powershell -ExecutionPolicy Bypass -File .\extensions\model-status\install.ps1
 - 「打开状态页」打开厂商官方状态页；
 - 自定义来源会自动生成 `custom-xxx` 的 id，可随时删除；删除时引用它的渠道订阅也会移除。
 
+### 4. 模型查询工具（model_status_query）
+
+插件给模型注册了一个只读工具 `model_status_query`，用户不需要手动打开设置页，直接问模型即可：
+
+- “DeepSeek 现在正常吗？”
+- “Claude 有没有故障？”
+- “Gemini API 状态怎么样？”
+- “查一下最近哪些模型出问题了？”
+
+工具参数：
+
+| 参数 | 说明 |
+|---|---|
+| `action` | `status` 查询指定厂商当前状态（默认）；`list` 列出插件支持的全部来源；`events` 查看插件最近捕获的状态变化事件 |
+| `vendor` | 厂商 id / 名称 / 关键词，如 `deepseek`、`claude`、`anthropic`、`openai`、`gpt`、`gemini`、`grok`、`groq`、`moonshot` |
+| `keyword` | 可选，只关注包含该关键词的组件 / 产品 / 事件，如 `API`、`R1`、`ChatGPT`、`Gemini` |
+| `limit` | 可选，`events` 返回条数，默认 10，最大 50 |
+
+工具只读、不修改订阅、不发送渠道消息；返回内容会经过纯文本截断，适合模型直接总结给用户。
+
 ## 工作原理
 
 ```
@@ -137,7 +156,7 @@ powershell -ExecutionPolicy Bypass -File .\extensions\model-status\install.ps1
 - 只读公开状态页 / RSS，不发送任何账号凭据；
 - 自定义 URL 会经过 SSRF 校验：拒绝 localhost / 内网 / 云元数据地址，重定向每一跳都会重新校验；
 - 支持已配置的 HTTP(S) 代理，代理地址只保存在本机 `model-status.json`；
-- 插件无模型工具、无写操作，不会把状态页内容作为提示词交给模型；
+- 插件只有一个只读查询工具 `model_status_query`，无写操作，不会把状态页内容作为指令执行；
 - 状态页内容一律按纯文本截断展示，不执行 HTML / 脚本。
 
 ## 已知边界
@@ -148,6 +167,7 @@ powershell -ExecutionPolicy Bypass -File .\extensions\model-status\install.ps1
   修改关键词或选择具体产品；
 - RSS / Atom 只有条目，不提供完整组件状态；需要精确到模型时请优先使用 Statuspage 站点；
 - `status.z.ai`、`status.llama.com` 等地址可能在部分地区的网络 / 代理出口不可达，失败时请改用自定义来源；
+- 硅基流动的官方状态域名 `status.siliconflow.cn` 目前会 CNAME 到 Better Stack，但在多数网络下 TLS 握手失败、页面也无法打开；v2.1.0 已暂时移除该内置来源，等官方恢复后可用「自定义来源」重新添加；
 - 通知正文是纯文本，兼容 QQ / NapCat / 微信；不会发送图片。
 
 ## 目录结构
@@ -181,6 +201,14 @@ node extensions/model-status/test.mjs
 
 自测不联网，覆盖来源目录、Statuspage / RSS / Atom / Google Cloud 解析、基线建立、事件去重、
 组件筛选、通知文案截断等纯逻辑。
+
+## 更新记录（v2.1.0）
+
+- 设置页修复：自定义来源区域改为独立表单布局，窄屏 / 长帮助文案不再把左侧文字挤成竖排；
+- 新增模型工具 `model_status_query`（action=status/list/events），模型可主动查询指定厂商的整体状态、组件、进行中故障与最近事件；
+- 后端新增 `/api/model-status/query`，支持按厂商 id / 名称 / 关键词模糊匹配来源，结果带缓存，避免模型重复追问时反复访问状态页；
+- 硅基流动 `status.siliconflow.cn`（Better Stack 托管）在当前网络下 TLS 握手失败、页面无法访问，暂时移除内置来源，等官方恢复后可自定义添加；
+- 查询结果会自动走现有代理、SSRF 保护与纯文本截断，不写状态、不发渠道消息。
 
 ## 更新记录（v2.0.1）
 

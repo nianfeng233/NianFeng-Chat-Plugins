@@ -31,6 +31,7 @@ import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import {
   clampNumber,
+  formatTime,
   isObject,
   randomToken,
   truncateText,
@@ -44,9 +45,12 @@ import {
   sourceUrlCandidates,
 } from './lib/sources.mjs'
 import {
+  componentStatusLabel,
+  incidentStatusLabel,
   isStatusPageSummary,
   parseStatusPageSummary,
   statusPageHistoryFeedUrl,
+  statusPageOverallLabel,
   statusPageSummaryUrl,
 } from './lib/statuspage.mjs'
 import { looksLikeFeed, parseFeed } from './lib/feed.mjs'
@@ -61,7 +65,7 @@ import {
 } from './lib/detect.mjs'
 
 export const name = 'model-status-bridge'
-export const version = '2.0.1'
+export const version = '2.1.0'
 export const displayName = '模型状态订阅后端桥'
 export const description = '轮询各厂商状态页 / RSS，检测模型服务状态变化并生成渠道通知。'
 export const author = '念风扩展'
@@ -539,6 +543,261 @@ export function apply(ctx) {
   /* 事件检测与通知                                                      */
   /* ------------------------------------------------------------------ */
 
+  /* ------------------------------------------------------------------ */
+  /* 模型状态查询（工具 / API 共用）                                     */
+  /* ------------------------------------------------------------------ */
+
+  const queryCache = new Map()
+
+  const resolveSourceHint = hint => {
+    const key = String(hint || '').trim().toLowerCase()
+    const list = allSources()
+    if (!key) return { source: null, matches: list, exact: false }
+    const exact = list.find(source =>
+      [source.id, source.name, source.vendor]
+        .filter(Boolean)
+        .some(value => String(value).toLowerCase() === key),
+    )
+    if (exact) return { source: exact, matches: [exact], exact: true }
+    const matches = list.filter(source => {
+      const haystack = [source.id, source.name, source.vendor, source.description, ...(Array.isArray(source.keywords) ? source.keywords : [])]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase()
+      return haystack.includes(key)
+    })
+    return { source: matches.length === 1 ? matches[0] : null, matches, exact: false }
+  }
+
+  const queryKeywordMatches = (keyword, ...values) => {
+    if (!keyword) return true
+    const wanted = String(keyword).toLowerCase()
+    return values
+      .flatMap(value => (Array.isArray(value) ? value : [value]))
+      .filter(value => value !== undefined && value !== null)
+      .map(value => String(value).toLowerCase())
+      .some(value => value.includes(wanted))
+  }
+
+  const publicSourceInfo = source => {
+    const meta = state.sourcesMeta[source.id] || null
+    return {
+      id: source.id,
+      name: source.name,
+      vendor: source.vendor || '',
+      emoji: source.emoji || '📡',
+      category: source.category || '',
+      adapter: source.adapter || 'auto',
+      url: source.url || '',
+      homepage: source.homepage || source.url || '',
+      description: source.description || '',
+      confidence: source.confidence || 'community',
+      subscribed: Object.values(state.subscriptions).some(
+        subscription => subscription.enabled !== false && subscription.sources?.[source.id]?.enabled !== false,
+      ),
+      meta: meta
+        ? {
+            lastCheckedAt: Number(meta.lastCheckedAt) || 0,
+            lastError: String(meta.lastError || ''),
+            pageName: String(meta.pageName || ''),
+            overallStatus: String(meta.overallStatus || ''),
+          }
+        : null,
+    }
+  }
+
+  const querySourceStatus = async (source, keyword = '') => {
+    const cacheKey = `${source.id}:${String(keyword || '').trim().toLowerCase()}`
+    const ttl = Math.max(15000, Math.min(5 * 60 * 1000, effectiveIntervalMs()))
+    const cached = queryCache.get(cacheKey)
+    if (cached && Date.now() - Number(cached.at || 0) < ttl) return cached.data
+
+    const loaded = await loadSourceWithFallback(source, state.snapshots[source.id])
+    const timeZone = state.config.timeZone || 'Asia/Shanghai'
+    const nowText = formatTime(Date.now(), timeZone)
+    const lines = []
+    let data = null
+
+    if (loaded.adapter === 'statuspage') {
+      const parsed = loaded.parsed
+      const keywordMatches = incident =>
+        queryKeywordMatches(
+          keyword,
+          incident.name,
+          incident.latestBody,
+          ...(incident.components || []).flatMap(component => [component.id, component.name]),
+        )
+      const componentMatches = component => queryKeywordMatches(keyword, component.id, component.name, component.description)
+      const components = (parsed.components || []).filter(component => !component.isGroup && componentMatches(component))
+      const visibleComponents = components.length ? components : (parsed.components || []).filter(component => !component.isGroup)
+      const incidents = (parsed.incidents || []).filter(incident => incident.status !== 'resolved' && keywordMatches(incident)).slice(0, 12)
+      const resolved = (parsed.incidents || []).filter(incident => incident.status === 'resolved' && keywordMatches(incident)).slice(0, 5)
+      const maintenances = (parsed.maintenances || []).filter(item => item.status !== 'completed' && keywordMatches(item)).slice(0, 8)
+      const overallStatus = statusPageOverallLabel(parsed.overall) || parsed.overall?.description || ''
+      lines.push(`【${source.name} 官方状态】`)
+      lines.push(`页面：${parsed.page?.name || source.name}`)
+      if (overallStatus) lines.push(`整体：${overallStatus}`)
+      if (keyword) lines.push(`筛选：${keyword}`)
+      if (visibleComponents.length) {
+        lines.push('组件：')
+        for (const component of visibleComponents.slice(0, 15)) {
+          lines.push(`- ${component.name}：${component.statusLabel || componentStatusLabel(component.status)}${component.group ? `（${component.group}）` : ''}`)
+        }
+      }
+      if (incidents.length) {
+        lines.push('进行中事件：')
+        for (const incident of incidents) {
+          lines.push(`- ${incident.name}：${incident.statusLabel || incidentStatusLabel(incident.status)}${incident.impactLabel ? ` · 影响：${incident.impactLabel}` : ''}`)
+          if (incident.latestBody) lines.push(`  最新：${truncateText(incident.latestBody, 320)}`)
+          if (incident.shortlink) lines.push(`  详情：${incident.shortlink}`)
+        }
+      } else {
+        lines.push('进行中事件：无公开故障。')
+      }
+      if (maintenances.length) {
+        lines.push('计划维护：')
+        for (const item of maintenances) {
+          lines.push(`- ${item.name}：${item.statusLabel || item.status}${item.scheduledFor ? ` · ${formatTime(item.scheduledFor, timeZone)}` : ''}`)
+        }
+      }
+      if (resolved.length && !keyword) {
+        lines.push('最近恢复：')
+        for (const item of resolved) lines.push(`- ${item.name}（${formatTime(item.updatedAt || item.resolvedAt, timeZone)}）`)
+      }
+      data = {
+        adapter: 'statuspage',
+        pageName: parsed.page?.name || source.name,
+        overallStatus,
+        components: visibleComponents.slice(0, 60).map(component => ({
+          id: component.id,
+          name: component.name,
+          status: component.status,
+          statusLabel: component.statusLabel || componentStatusLabel(component.status),
+          group: component.group || '',
+        })),
+        incidents: incidents.map(incident => ({
+          id: incident.id,
+          name: incident.name,
+          status: incident.status,
+          statusLabel: incident.statusLabel,
+          impact: incident.impact,
+          impactLabel: incident.impactLabel,
+          updatedAt: incident.updatedAt,
+          body: truncateText(incident.latestBody || '', 600),
+          url: incident.shortlink || '',
+          components: (incident.components || []).map(component => ({ id: component.id, name: component.name })),
+        })),
+        maintenances: maintenances.map(item => ({
+          id: item.id,
+          name: item.name,
+          status: item.status,
+          statusLabel: item.statusLabel,
+          scheduledFor: item.scheduledFor,
+          scheduledUntil: item.scheduledUntil,
+        })),
+      }
+    } else if (loaded.adapter === 'rss') {
+      const items = (loaded.parsed.items || [])
+        .filter(item => queryKeywordMatches(keyword, item.title, item.body, item.url))
+        .slice(0, 12)
+      lines.push(`【${source.name} 官方动态】`)
+      if (keyword) lines.push(`筛选：${keyword}`)
+      if (!items.length) {
+        lines.push('没有匹配的动态。')
+      } else {
+        lines.push('最近动态：')
+        for (const item of items) {
+          lines.push(`- ${item.title || '状态更新'}${item.publishedAt ? `（${formatTime(item.publishedAt, timeZone)}）` : ''}`)
+          if (item.body && item.body !== item.title) lines.push(`  ${truncateText(item.body, 220)}`)
+          if (item.url) lines.push(`  详情：${item.url}`)
+        }
+      }
+      data = {
+        adapter: 'rss',
+        pageName: loaded.parsed.page?.name || source.name,
+        overallStatus: '',
+        components: [],
+        incidents: [],
+        maintenances: [],
+        items: items.map(item => ({
+          id: item.id,
+          title: item.title,
+          body: truncateText(item.body || '', 600),
+          url: item.url || '',
+          publishedAt: item.publishedAt || 0,
+        })),
+      }
+    } else {
+      const parsed = loaded.parsed
+      const matchIncident = incident =>
+        queryKeywordMatches(
+          keyword,
+          incident.title,
+          incident.body,
+          ...(incident.components || []).flatMap(component => [component.id, component.name]),
+        )
+      const active = (parsed.incidents || []).filter(incident => !incident.resolvedAt && matchIncident(incident)).slice(0, 12)
+      const resolved = (parsed.incidents || []).filter(incident => incident.resolvedAt && matchIncident(incident)).slice(0, 5)
+      const products = googleCloudProducts(parsed, source).filter(product => queryKeywordMatches(keyword, product.id, product.name))
+      lines.push(`【${source.name} 官方状态】`)
+      if (keyword) lines.push(`筛选：${keyword}`)
+      if (products.length) {
+        lines.push(`相关产品：${products.slice(0, 12).map(product => product.name || product.id).join('、')}`)
+      }
+      if (active.length) {
+        lines.push('进行中事件：')
+        for (const incident of active) {
+          lines.push(`- ${incident.title}：${incident.statusLabel || incident.status}${incident.resolvedAt ? '' : ''}`)
+          if (incident.body) lines.push(`  最新：${truncateText(incident.body, 320)}`)
+          if (incident.url) lines.push(`  详情：${incident.url}`)
+        }
+      } else {
+        lines.push('进行中事件：无公开故障。')
+      }
+      if (resolved.length && !keyword) {
+        lines.push('最近恢复：')
+        for (const incident of resolved) lines.push(`- ${incident.title}（${formatTime(incident.resolvedAt, timeZone)}）`)
+      }
+      data = {
+        adapter: 'google-cloud',
+        pageName: parsed.page?.name || source.name,
+        overallStatus: '',
+        components: products.slice(0, 80).map(product => ({ id: product.id, name: product.name, status: '', statusLabel: '' })),
+        incidents: active.map(incident => ({
+          id: incident.id,
+          name: incident.title,
+          status: incident.status,
+          statusLabel: incident.statusLabel,
+          impactLabel: incident.statusLabel,
+          updatedAt: incident.updatedAt,
+          body: truncateText(incident.body || '', 600),
+          url: incident.url || '',
+          components: (incident.components || []).map(component => ({ id: component.id, name: component.name })),
+        })),
+        maintenances: [],
+      }
+    }
+
+    lines.push(`数据时间：${nowText}`)
+    const text = truncateText(lines.filter(Boolean).join('\n'), 2600)
+    const result = {
+      source: {
+        id: source.id,
+        name: source.name,
+        vendor: source.vendor || '',
+        emoji: source.emoji || '📡',
+        adapter: loaded.adapter,
+        url: source.url || '',
+        homepage: source.homepage || source.url || '',
+      },
+      endpoint: loaded.endpoint,
+      fetchedAt: Date.now(),
+      text,
+      ...data,
+    }
+    queryCache.set(cacheKey, { at: Date.now(), data: result })
+    return result
+  }
   const eventTooOld = event => {
     const maxAge = clampNumber(state.config.maxEventAgeMs, 60 * 1000, 30 * 24 * 60 * 60 * 1000, DEFAULT_CONFIG.maxEventAgeMs)
     const at = Number(event?.at) || 0
@@ -1113,6 +1372,67 @@ export function apply(ctx) {
       httpApi.sendJson(res, 200, { ok: true, ...result })
     }),
 
+    safeRoute('GET', '/api/model-status/query', async (req, res, params, url) => {
+      const action = String(url?.searchParams?.get('action') || 'status').toLowerCase()
+      const vendor = String(url?.searchParams?.get('vendor') || url?.searchParams?.get('source') || url?.searchParams?.get('sourceId') || '').trim()
+      const keyword = truncateText(String(url?.searchParams?.get('keyword') || '').trim(), 80)
+      const limit = Math.floor(clampNumber(url?.searchParams?.get('limit'), 1, 50, 10))
+
+      if (action === 'list') {
+        httpApi.sendJson(res, 200, {
+          ok: true,
+          action: 'list',
+          sources: allSources().map(publicSourceInfo).sort((a, b) => String(a.id).localeCompare(String(b.id))),
+        })
+        return
+      }
+      if (action === 'events') {
+        httpApi.sendJson(res, 200, {
+          ok: true,
+          action: 'events',
+          events: state.events.slice(0, limit).map(event => ({
+            id: event.id,
+            sourceId: event.sourceId,
+            sourceName: event.sourceName,
+            kind: event.kind,
+            title: event.title,
+            at: event.at,
+            statusLabel: event.statusLabel,
+            impactLabel: event.impactLabel,
+            body: truncateText(event.body || '', 300),
+            url: event.url || '',
+            suppressed: event.suppressed === true,
+          })),
+        })
+        return
+      }
+      if (!vendor) {
+        httpApi.sendJson(res, 200, {
+          ok: false,
+          error: '请指定要查询的厂商（vendor），例如 deepseek / claude / openai / gemini / grok。',
+          sources: allSources().map(publicSourceInfo).sort((a, b) => String(a.id).localeCompare(String(b.id))),
+        })
+        return
+      }
+
+      const resolved = resolveSourceHint(vendor)
+      if (!resolved.source) {
+        httpApi.sendJson(res, 200, {
+          ok: false,
+          error: resolved.matches.length
+            ? `「${vendor}」匹配到多个来源，请使用更精确的 id。`
+            : `没有找到与「${vendor}」匹配的状态来源。`,
+          candidates: resolved.matches.slice(0, 12).map(publicSourceInfo),
+        })
+        return
+      }
+      try {
+        const result = await querySourceStatus(resolved.source, keyword)
+        httpApi.sendJson(res, 200, { ok: true, action: 'status', ...result })
+      } catch (error) {
+        httpApi.sendJson(res, 200, { ok: false, error: String(error?.message || error) })
+      }
+    }),
     safeRoute('GET', '/api/model-status/events', async (req, res, params, url) => {
       const limit = clampNumber(url?.searchParams?.get('limit'), 1, 100, 30)
       httpApi.sendJson(res, 200, { ok: true, events: state.events.slice(0, Math.floor(limit)) })

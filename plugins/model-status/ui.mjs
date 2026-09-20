@@ -137,12 +137,14 @@ export const PANEL_CSS = `
 .ms-card-head { display:flex; align-items:flex-start; justify-content:space-between; gap:10px; margin-bottom:8px; }
 .ms-card-title { font-size:14px; font-weight:700; }
 .ms-card-desc { font-size:12px; color:var(--text-dim,#6e7781); margin-top:2px; line-height:1.5; }
-.ms-row { display:flex; align-items:flex-start; justify-content:space-between; gap:14px; padding:7px 0; border-top:1px solid var(--border-color,#eaeef2); }
+.ms-row { display:flex; align-items:flex-start; justify-content:space-between; gap:14px; padding:7px 0; border-top:1px solid var(--border-color,#eaeef2); flex-wrap:wrap; }
 .ms-row:first-child { border-top:none; }
-.ms-row-main { min-width:0; flex:1; }
+.ms-row-main { min-width:200px; flex:1 1 260px; }
 .ms-row-name { font-size:13px; font-weight:600; }
 .ms-row-help { font-size:12px; color:var(--text-dim,#6e7781); margin-top:2px; line-height:1.5; }
-.ms-row-control { display:flex; align-items:center; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
+.ms-row-control { display:flex; align-items:center; gap:8px; flex-wrap:wrap; justify-content:flex-end; flex:1 1 auto; max-width:100%; }
+.ms-custom-form { border-top:1px dashed var(--border-color,#d0d7de); margin-top:10px; padding-top:10px; }
+.ms-custom-form .ms-toolbar { margin:7px 0 0; }
 .ms-toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:10px 0; }
 .ms-status { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin:8px 0 2px; }
 .ms-channel { border:1px solid var(--border-color,#d0d7de); border-radius:12px; padding:11px; margin:10px 0; background:var(--card-bg,rgba(255,255,255,.55)); }

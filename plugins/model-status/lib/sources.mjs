@@ -185,14 +185,6 @@ export const BUILTIN_SOURCES = [
     description: 'Z.ai / GLM 服务状态；地址未在全部网络环境验证',
     confidence: 'community',
   }),
-  source('siliconflow', '硅基流动 SiliconFlow', {
-    vendor: 'SiliconFlow',
-    emoji: '🌊',
-    color: '#7c3aed',
-    url: 'https://status.siliconflow.cn',
-    description: '硅基流动模型 API 服务状态；地址未在全部网络环境验证',
-    confidence: 'community',
-  }),
   source('cursor', 'Cursor', {
     emoji: '🖱️',
     color: '#0f172a',

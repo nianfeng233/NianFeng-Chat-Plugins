@@ -406,9 +406,10 @@ export function renderModelStatusPanel(container, helpers = {}) {
 
   const renderSourcesCard = () => {
     const categories = [{ value: 'all', label: '全部分类' }, ...CATEGORY_ORDER.map(value => ({ value, label: CATEGORY_LABELS[value] }))]
-    const customForm = `<div class="ms-row" style="border-top:1px solid var(--border-color,#eaeef2);margin-top:8px;padding-top:10px">
-      <div class="ms-row-main"><div class="ms-row-name">添加自定义来源</div><div class="ms-row-help">没有内置的厂商可以自己填状态页根地址或 RSS 地址；auto 会优先识别 Statuspage API，再尝试 RSS / Atom。</div></div>
-      <div class="ms-row-control">
+    const customForm = `<div class="ms-custom-form">
+      <div class="ms-row-name">添加自定义来源</div>
+      <div class="ms-row-help">没有内置的厂商可以自己填状态页根地址或 RSS 地址；auto 会优先识别 Statuspage API，再尝试 RSS / Atom。</div>
+      <div class="ms-toolbar">
         ${input('ms-custom-name', '', { placeholder: '名称，如 Kimi', width: 150 })}
         ${input('ms-custom-url', '', { placeholder: 'https://status.example.com 或 RSS 地址', width: 260 })}
         ${select('ms-custom-adapter', 'auto', ADAPTERS.map(value => ({ value, label: ADAPTER_LABELS[value] })), { width: 150 })}

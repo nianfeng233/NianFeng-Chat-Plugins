@@ -13,7 +13,7 @@
  *     轮询 Statuspage API / RSS / Google Cloud incidents，检测状态变化。
  */
 export const name = 'model-status'
-export const version = '2.0.1'
+export const version = '2.1.0'
 export const scope = 'both'
 export const displayName = '模型状态订阅'
 export const description = '订阅 DeepSeek、Claude、GPT、Gemini、Grok 等模型厂商状态页，故障 / 恢复 / 组件状态变化推送到渠道。'
@@ -23,6 +23,7 @@ export const core = false
 export const enabled = true
 export const depends = {
   'event-bus': '*',
+  'tool-registry': '^1.0.0',
   'channel-registry': '^1.0.0',
   'session-service': '^2.0.0',
   'message-service': '^1.0.0',
@@ -36,17 +37,18 @@ export const optionalDepends = {
   'toast-host': '>=1.0.0',
   'modal-host': '>=1.0.0',
 }
-export const inject = ['event-bus', 'channel-registry', 'session-service', 'message-service']
+export const inject = ['event-bus', 'tool-registry', 'channel-registry', 'session-service', 'message-service']
 export const provides = []
 export const permissions = ['network', 'storage']
 
 import { MODEL_STATUS_ICON, PANEL_CSS, useStyle } from './ui.mjs'
 import { renderModelStatusPanel } from './panel.mjs'
-import { truncateText } from './lib/util.mjs'
+import { formatTime, truncateText } from './lib/util.mjs'
 
 const BRIDGE_NOT_LOADED_HINT = '请在「设置 → 插件」点一次「重新扫描」热加载外置后端桥；如果当前内核版本较旧，请安装后重启念风后端。'
 
 export function apply(ctx) {
+  const tools = ctx.inject('tool-registry')
   const channels = ctx.inject('channel-registry')
   const sessions = ctx.inject('session-service')
   const messages = ctx.inject('message-service')
@@ -536,6 +538,97 @@ export function apply(ctx) {
     flushPending().catch(() => {})
   }, 1500)
   flushPending().catch(() => {})
+  /* ------------------------------------------------------------------ */
+  /* 模型状态查询工具                                                    */
+  /* ------------------------------------------------------------------ */
+
+  if (tools?.register) {
+    try {
+      const toolDispose = tools.register(
+        'model_status_query',
+        {
+          description:
+            '查询各模型厂商的官方服务状态。支持 DeepSeek / Claude / OpenAI (GPT) / Gemini / Grok 以及插件内置的其它厂商；可列出支持的来源、查询指定厂商当前整体状态 / 组件状态 / 进行中故障与计划维护，或查看插件最近捕获的状态变化事件。用户问“DeepSeek 现在正常吗”“Claude 有没有故障”“Gemini API 状态怎么样”“查一下最近哪些模型出问题了”时使用。',
+          parameters: {
+            type: 'object',
+            properties: {
+              action: {
+                type: 'string',
+                enum: ['status', 'list', 'events'],
+                description: 'status=查询指定厂商当前状态（默认）；list=列出插件支持的全部厂商来源；events=查看插件最近捕获的状态变化事件。',
+              },
+              vendor: {
+                type: 'string',
+                description: '厂商 id / 名称 / 关键词，例如 deepseek、claude、anthropic、openai、gpt、gemini、grok、xai、groq、moonshot 等；action=status 时使用。',
+              },
+              keyword: {
+                type: 'string',
+                description: '可选：只关注包含该关键词的模型组件、产品或事件，例如 API、R1、ChatGPT、Gemini。',
+              },
+              limit: {
+                type: 'number',
+                description: '可选：action=events 时返回几条，默认 10，最大 50。',
+              },
+            },
+            required: ['action'],
+          },
+        },
+        async (args = {}, context = {}) => {
+          if (
+            !centralScopeAllows({
+              conversationId: context?.conversationId,
+              channelId: context?.channelId,
+              roleId: context?.roleId,
+            })
+          ) {
+            return { ok: false, error: '模型状态订阅未在当前角色 / 渠道启用。' }
+          }
+          const action = String(args.action || 'status').toLowerCase()
+          if (!['status', 'list', 'events'].includes(action)) {
+            return { ok: false, error: 'action 只支持 status / list / events。' }
+          }
+          const params = new URLSearchParams()
+          params.set('action', action)
+          if (args.vendor) params.set('vendor', String(args.vendor))
+          if (args.keyword) params.set('keyword', String(args.keyword))
+          if (args.limit !== undefined && args.limit !== null && args.limit !== '') {
+            params.set('limit', String(Math.max(1, Math.min(50, Number(args.limit) || 10))))
+          }
+          const result = await bridgeCall('GET', `/model-status/query?${params.toString()}`, null, 60000)
+          if (result?.ok === false) {
+            const candidates = Array.isArray(result.candidates) ? result.candidates : []
+            const hint = candidates.length ? `\n候选来源：${candidates.map(item => `${item.id}（${item.name}）`).join('、')}` : ''
+            return { ok: false, error: `${result.error || '查询失败'}${hint}` }
+          }
+          if (action === 'list') {
+            const sources = Array.isArray(result.sources) ? result.sources : []
+            const text = sources
+              .map(item => `- ${item.id}：${item.name}（${item.adapter}${item.subscribed ? ' · 已订阅' : ''}）`)
+              .join('\n')
+            return { ok: true, result: `插件当前支持 ${sources.length} 个状态来源：\n${text}` }
+          }
+          if (action === 'events') {
+            const events = Array.isArray(result.events) ? result.events : []
+            if (!events.length) return { ok: true, result: '最近没有捕获到状态变化事件。' }
+            const text = events
+              .map(event => {
+                const status = event.statusLabel ? `（${event.statusLabel}）` : ''
+                return `- [${formatTime(event.at, 'Asia/Shanghai')}] ${event.sourceName || event.sourceId} · ${event.title || event.kind || '状态更新'}${status}${event.body ? `\n  ${event.body}` : ''}${event.url ? `\n  ${event.url}` : ''}`
+              })
+              .join('\n')
+            return { ok: true, result: text }
+          }
+          return { ok: true, result: result.text || '没有查询到状态信息。' }
+        },
+      )
+      ctx.effect(() => () => toolDispose?.())
+      ctx.logger.info('模型状态查询工具已注册：model_status_query')
+    } catch (error) {
+      ctx.logger.warn(`[model-status] 注册模型状态查询工具失败：${error?.message || error}`)
+    }
+  }
+
+
 
   /* ------------------------------------------------------------------ */
   /* 设置面板                                                            */
