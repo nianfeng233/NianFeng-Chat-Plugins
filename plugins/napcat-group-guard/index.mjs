@@ -94,6 +94,14 @@ const MEMBER_CACHE_MS = 30000
 const NOTICE_DEDUPE_MS = 15000
 const NOTICE_DEDUPE_LIMIT = 600
 /**
+ * 入群 notice 的新鲜度窗口：正常事件会在成员入群后秒级到达；
+ * 超过该窗口才收到的 group_increase 基本是 NapCat 断线重连 / 事件积压后补发的旧事件。
+ * 这类事件不能再按“新人入群”补欢迎，否则会和历史欢迎重复刷屏。
+ */
+const JOIN_NOTICE_FRESH_MS = 10 * 60 * 1000
+/** 持久化的「已欢迎入群事件」记忆条数，用 join_time 区分同一次入群。 */
+const GREETED_JOIN_LIMIT = 500
+/**
  * 档案图 base64 字符上限。后端 action 路由默认只接收 2MB JSON，
  * 超过时 send_group_msg 会整体失败（文字也一起丢）。这里主动降质 / 缩放，
  * 保证档案图能放进消息里；仍然超限时至少要把失败写进日志。
@@ -172,6 +180,13 @@ function safeJsonStringify(value) {
   } catch (_) {
     return '{}'
   }
+}
+
+/** 把秒 / 毫秒时间戳统一成秒；无法识别时返回 0。 */
+function epochSeconds(value) {
+  const n = Number(value)
+  if (!Number.isFinite(n) || n <= 0) return 0
+  return Math.floor(n > 1e12 ? n / 1000 : n)
 }
 
 function fmtTime(value) {
@@ -438,6 +453,34 @@ export function apply(ctx) {
     if (!value) return
     const flags = [value, ...(readState().processedFlags || []).filter(item => item !== value)].slice(0, PROCESSED_FLAG_LIMIT)
     writeState({ processedFlags: flags })
+  }
+
+  /**
+   * 入群欢迎的持久化幂等键：实例 + 群号 + 成员 QQ + 入群时间（秒）。
+   * 同一次入群被重复投递（SSE 重连 / 多页面广播 / NapCat 补发）时只会欢迎一次；
+   * 成员真的退群再进时 join_time 会变化，仍会按新事件正常欢迎。
+   */
+  function greetedJoinKey(instanceId, groupId, qq, joinAt) {
+    return `${normalizeQq(instanceId)}:${normalizeQq(groupId)}:${normalizeQq(qq)}:${epochSeconds(joinAt)}`
+  }
+
+  function readGreetedJoins() {
+    const raw = readState().greetedJoins
+    return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {}
+  }
+
+  function isJoinGreeted(instanceId, groupId, qq, joinAt) {
+    if (!(epochSeconds(joinAt) > 0)) return false
+    return Number(readGreetedJoins()[greetedJoinKey(instanceId, groupId, qq, joinAt)]) > 0
+  }
+
+  function markJoinGreeted(instanceId, groupId, qq, joinAt) {
+    if (!(epochSeconds(joinAt) > 0)) return
+    const key = greetedJoinKey(instanceId, groupId, qq, joinAt)
+    const entries = Object.entries({ ...readGreetedJoins(), [key]: Date.now() })
+      .sort((a, b) => (Number(b[1]) || 0) - (Number(a[1]) || 0))
+      .slice(0, GREETED_JOIN_LIMIT)
+    writeState({ greetedJoins: Object.fromEntries(entries) })
   }
 
   function recordRejection(groupId, qq) {
@@ -2040,13 +2083,13 @@ export function apply(ctx) {
    * 档案图开关与欢迎文本开关相互独立——即使欢迎语关了，只要档案图开着，
    * 正常入群 / 被拉进群 / 审批入群都会带上一张资料卡。
    */
-  async function sendJoinWelcome(instanceId, groupId, qq, rule) {
+  async function sendJoinWelcome(instanceId, groupId, qq, rule, { profile: prefetchedProfile = null } = {}) {
     const effective = rule || resolveRule(groupId, groupDisplayName(groupId))
     if (!effective.enabled) return { ok: true, skipped: true }
     const sendText = !!effective.notifyJoinSuccess
     const sendImage = !!effective.openBoxImage
     if (!sendText && !sendImage) return { ok: true, skipped: true }
-    const profile = await fetchProfileSnapshot(instanceId, groupId, qq)
+    const profile = prefetchedProfile || (await fetchProfileSnapshot(instanceId, groupId, qq))
     const segments = []
     if (sendImage) {
       const segment = await buildDossierSegment(profile, { eventType: 'join', groupName: effective.groupName, label: '进群欢迎' })
@@ -2075,13 +2118,13 @@ export function apply(ctx) {
    * 退群 / 被踢 / 黑名单拦截 / 清理踢出提示：文本与档案图永远在同一条
    * send_group_msg 里；文本开关关闭时只要档案图开启，也会单独发送资料卡。
    */
-  async function sendDecreaseNotice(instanceId, groupId, { subType = 'leave', qq = '', operator = '', nickname = '', rule = null, mergeBlacklist = null } = {}) {
+  async function sendDecreaseNotice(instanceId, groupId, { subType = 'leave', qq = '', operator = '', nickname = '', rule = null, mergeBlacklist = null, profile: prefetchedProfile = null } = {}) {
     const effective = rule || resolveRule(groupId, groupDisplayName(groupId))
     if (!effective.enabled) return { ok: true, skipped: true }
     const sendText = !!effective.notifyDecrease
     const sendImage = !!effective.openBoxImage
     if (!sendText && !sendImage) return { ok: true, skipped: true }
-    const profile = await fetchProfileSnapshot(instanceId, groupId, qq)
+    const profile = prefetchedProfile || (await fetchProfileSnapshot(instanceId, groupId, qq))
     const name = nickname || profile.nickname || normalizeQq(qq)
     const segments = []
     let imageSegment = null
@@ -2355,20 +2398,57 @@ export function apply(ctx) {
     if (type === 'group_increase') {
       // 黑名单用户被邀请 / 被管理员放进来时，照样触发踢出；入群成功也重置连续拒绝计数。
       if (rejectionCount(groupId, qq) > 0) clearRejection(groupId, qq)
+
+      // 先取一次成员资料：既用于欢迎文案 / 档案图，也拿 join_time 判断这条 notice
+      // 到底是不是刚发生的新入群。NapCat 断线重连 / 事件积压后会补发旧 notice，
+      // 只靠 15s / 60s 的短去重完全挡不住几小时后的重放，所以这里再做两层防线：
+      //   1) 同一次入群（实例 + 群 + QQ + join_time）持久化记忆，成功处理过就不再欢迎；
+      //   2) 入群时间距现在过久时直接跳过，避免升级/清空状态后旧事件又补一遍欢迎。
+      let profile = null
+      try {
+        profile = await fetchProfileSnapshot(instanceId, groupId, qq)
+      } catch (err) {
+        logger.debug(`[napcat-group-guard] 读取入群成员资料失败，跳过入群时间校验：${err?.message || err}`)
+      }
+      const joinAt = epochSeconds(profile?.member?.join_time) || epochSeconds(raw.time) || 0
+      const alreadyGreeted = isJoinGreeted(instanceId, groupId, qq, joinAt)
+      const stale = joinAt > 0 && Date.now() - joinAt * 1000 > JOIN_NOTICE_FRESH_MS
+
       if (rule.autoKickBlacklisted && isBlacklisted(qq, rule.blacklistId)) {
+        // 旧事件重放时不再重复发档案卡 / 拦截提示，但仍尝试踢出，保证黑名单最终生效。
+        if (alreadyGreeted || stale) {
+          await markKickNoticeSent(instanceId, groupId, qq)
+          const result = await kickMember(instanceId, groupId, qq, { rule, reason: '黑名单成员入群', source: 'notice-increase' })
+          if (!result.ok && !result.skipped) ctx.logger.warn(`[napcat-group-guard] 黑名单入群自动踢出失败：${result.error}`)
+          return
+        }
+        markJoinGreeted(instanceId, groupId, qq, joinAt)
         // 先发同一条消息里的档案卡 + 拦截提示，再执行踢出；这样无论 NapCat 之后
         // 是否补发 group_decrease，用户都能看到完整资料卡。
         await markKickNoticeSent(instanceId, groupId, qq)
-        await sendDecreaseNotice(instanceId, groupId, { subType: 'blacklist', qq, rule }).catch(err =>
+        await sendDecreaseNotice(instanceId, groupId, { subType: 'blacklist', qq, rule, profile }).catch(err =>
           logger.warn(`[napcat-group-guard] 黑名单入群档案卡发送失败：${err?.message || err}`),
         )
         const result = await kickMember(instanceId, groupId, qq, { rule, reason: '黑名单成员入群', source: 'notice-increase' })
         if (!result.ok && !result.skipped) ctx.logger.warn(`[napcat-group-guard] 黑名单入群自动踢出失败：${result.error}`)
         return
       }
+
+      if (alreadyGreeted) {
+        logger.debug(`[napcat-group-guard] 群 ${groupId} 成员 ${qq} 的同一次入群已处理过，忽略重复 notice。`)
+        return
+      }
+      if (stale) {
+        ctx.logger.warn(
+          `[napcat-group-guard] 忽略过期的入群 notice：群 ${groupId} 成员 ${qq}（入群时间 ${fmtTime(joinAt)}），` +
+            `疑似 NapCat 断线重连 / 事件积压后补发，已跳过欢迎以免和历史通知重复。`,
+        )
+        return
+      }
+      markJoinGreeted(instanceId, groupId, qq, joinAt)
       // 正常入群 / 被拉进群：文本和档案图是否发送由 sendJoinWelcome 内部按
       // notifyJoinSuccess / openBoxImage 分别判断，始终合并为一条消息。
-      await sendJoinWelcome(instanceId, groupId, qq, rule).catch(err => logger.warn(`[napcat-group-guard] 进群欢迎失败：${err?.message || err}`))
+      await sendJoinWelcome(instanceId, groupId, qq, rule, { profile }).catch(err => logger.warn(`[napcat-group-guard] 进群欢迎失败：${err?.message || err}`))
       return
     }
 

@@ -2,7 +2,7 @@
   "id": "napcat-group-guard",
   "name": "napcat-group-guard",
   "displayName": "群管助手",
-  "version": "2.0.4",
+  "version": "2.0.5",
   "author": "念风扩展",
   "description": "NapCat 群自动管理扩展：只响应显式配置的群，未配置群完全忽略；入群申请自动审核（QQ 等级 / 进群白词黑词 / 共享黑名单）、申请 / 进出群档案图、退群或被踢与自动拉黑合并为一条提示、定期清理不活跃成员；支持模型主动把某群清理倒计时缩减为立即触发，并在每天约 20:00 播报下一轮清人时间与剩余天数；档案图由服务端渲染，不需要 WebUI 页面常驻。",
   "entry": "./index.mjs",
@@ -29,7 +29,7 @@
   ],
   "distribution": {
     "directory": "extensions/napcat-group-guard",
-    "zip": "napcat-group-guard-v2.0.4.zip",
+    "zip": "napcat-group-guard-v2.0.5.zip",
     "placement": "外部插件：<数据目录>/plugins/napcat-group-guard/；需与内置 NapCat 渠道插件配合使用，也可在「设置 → 插件 → 添加插件」里直接上传 zip 安装"
   },
   "scope": "both"
