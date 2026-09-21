@@ -256,6 +256,17 @@ export function renderGithubHubPanel(container, helpers = {}) {
     await loadAll()
   }
 
+  /** 代理独立保存：输入框失焦 / 点“保存代理”时立即写后端，避免用户以为关闭面板自动保存。 */
+  const saveProxy = async () => {
+    const proxy = String(fieldValue(container, 'proxy') || '').trim()
+    const result = await api('PUT', '/github-hub/config', { proxy })
+    if (result?.ok === false) return notify('error', result.error || '代理保存失败')
+    if (state.status && result?.config) {
+      state.status = { ...state.status, config: { ...(state.status.config || {}), ...result.config } }
+    }
+    notify('success', proxy ? `GitHub 代理已保存：${proxy}` : '代理已清空，改为跟随全局代理')
+  }
+
   const clearToken = async () => {
     const confirmed = await confirmAction('清除 GitHub Token', '清除后只能以未登录状态读取公开仓库，自动回复也会停止。确定继续？')
     if (!confirmed) return
@@ -389,7 +400,7 @@ export function renderGithubHubPanel(container, helpers = {}) {
           row('GitHub 登录名', '可选。用于在通知里识别你自己的操作；配置 Token 后插件也会自动识别 Token 所属账号并一起忽略。', input('userLogin', config.userLogin || '', { placeholder: '例如 nianfeng233', width: 220 })) +
           row('忽略自己触发的事件', '开启后，你自己账号创建的 Issue、评论不会推送通知，也不会自动分析；分支 Push / Release 仍会按订阅推送。默认开启。', switchButton('忽略自己', 'ignoreSelf', config.ignoreSelf !== false)) +
           row('轮询间隔', '越短越及时；未配置 Token 时 GitHub 限额较低，插件会自动放慢。', select('pollSeconds', Math.round((Number(config.pollIntervalMs) || 120000) / 1000), [30, 60, 120, 300, 600, 1800, 3600].map(value => ({ value, label: value < 60 ? `${value} 秒` : `${value / 60} 分钟` })), { width: 150 })) +
-          row('HTTP 代理', 'GitHub API 访问代理，例如 http://127.0.0.1:7890。留空则跟随「设置 → 网络」的全局代理。', input('proxy', config.proxy || '', { placeholder: '跟随全局代理', width: 240 })) +
+          row('HTTP 代理', 'GitHub API 访问代理，例如 http://127.0.0.1:7890。留空则跟随「设置 → 网络」的全局代理；输入框失焦或点「保存代理」立即保存。', `<span class="ghh-toolbar">${input('proxy', config.proxy || '', { placeholder: '跟随全局代理', width: 240 })}${button('保存代理', 'save-proxy')}</span>`) +
           row('GitHub API 地址', '高级选项。GitHub Enterprise 可改为 https://your-host/api/v3。', input('apiBase', config.apiBase || 'https://api.github.com', { width: 280 })) +
           row('通知卡片发到渠道', '开启后，渠道通知会附带一张 SVG 项目卡片。部分渠道（如 QQ）可能不支持 SVG 图片，失败会自动降级为纯文本。', switchButton('发送卡片', 'channels.sendCard', channelsConfig.sendCard === true)) +
           row('渠道通知长度上限', '单条渠道通知最多保留多少字符，默认 900。', input('channels.maxTextChars', channelsConfig.maxTextChars || 900, { type: 'number', width: 110 })) +
@@ -715,6 +726,7 @@ export function renderGithubHubPanel(container, helpers = {}) {
     if (action === 'refresh') return loadAll()
     if (action === 'poll-now') return pollNow()
     if (action === 'save-config') return saveGlobalConfig()
+    if (action === 'save-proxy') return saveProxy()
     if (action === 'save-scope') return saveScope()
     if (action === 'scope-toggle') {
       const selector = target.dataset.scopeType === 'channel' ? '[data-scope-channel]' : '[data-scope-role]'
@@ -797,7 +809,10 @@ export function renderGithubHubPanel(container, helpers = {}) {
     if (!target) return
     if (target.dataset.action === 'toggle-event') {
       toggleEvent(target.dataset.channelId, target.dataset.repo, target.dataset.eventKey, target.checked)
+      return
     }
+    // HTTP 代理输入框失焦即保存，避免用户以为关闭面板会自动保存。
+    if (target.dataset.field === 'proxy') saveProxy()
   }
 
   const onSwitchClick = event => {

@@ -13,7 +13,7 @@
  * 的 bridge.mjs 完成后端，Token 不进入前端。
  */
 export const name = 'github-hub'
-export const version = '2.0.3'
+export const version = '2.0.4'
 export const scope = 'both'
 export const displayName = 'GitHub 助手'
 export const description = 'GitHub 仓库订阅推送 · 链接项目卡片预览 · LLM 只读分析并回复 Issue（独立扩展）。'

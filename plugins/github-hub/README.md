@@ -164,6 +164,11 @@ extensions/github-hub/
 - HTTP 请求支持本机 / 全局代理；代理地址只会用于 GitHub API 与头像下载。
 
 
+## 更新记录（v2.0.4）
+
+- **HTTP 代理改为失焦 / 独立按钮保存**：代理输入框改成离开输入框即保存，并新增「保存代理」按钮；不再要求用户必须去点 GitHub Token 那一行的「保存配置」，避免以为关闭面板会自动保存。
+
+
 ## 更新记录（v2.0.3）
 
 - **修复 PushEvent 延迟时通知被静默跳过**：`rebuildMonitors()` 不再在每次保存配置时推进 `sinceAt`；未成功处理过事件的仓库保持 `sinceAt=0`，等 GitHub 延迟返回 PushEvent 后仍可补发。
