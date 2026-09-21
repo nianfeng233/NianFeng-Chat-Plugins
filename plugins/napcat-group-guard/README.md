@@ -110,7 +110,7 @@ powershell -ExecutionPolicy Bypass -File .\extensions\napcat-group-guard\install
 ### 方式 C：上传 zip 安装
 
 在 设置 → 插件 →「外部插件目录」一行点 **添加插件**，选择本目录下的
-`napcat-group-guard-v2.0.5.zip`；上传成功后插件会自动解压到服务器端外部插件目录，
+`napcat-group-guard-v2.0.6.zip`；上传成功后插件会自动解压到服务器端外部插件目录，
 按提示刷新页面即可。
 
 > 注意：zip 内已经是插件根目录结构（`napcat-group-guard/index.mjs` 等），不要再手动套一层文件夹。
@@ -327,4 +327,5 @@ guard.pollRequests()                           // 手动触发一次积压申请
 - v2.0.3：新增 `cleanup_kick`：已发过预告、正在等待踢人的待办可以直接执行，不再补发 @全体预告。
 - v2.0.4：不活跃清理踢出不再逐人发送档案图，改为批次结束后合并一条文本摘要，避免刷屏。
 - v2.0.5：修复 NapCat 断线重连 / 事件积压后补发旧 `group_increase` 导致同一位老成员被重复播报进群欢迎的问题；现在按「实例 + 群 + QQ + 入群时间」持久化幂等记忆，并对明显过期的入群事件直接跳过，真正做到同一次入群只欢迎一次。
+- v2.0.6：修复 v2.0.5 的 `index.mjs` 导出版本号仍停留在 2.0.4、而 manifest 已升到 2.0.5，导致插件市场安装成功后仍显示「本地 2.0.4 / 可更新」的问题；导出版本号与 manifest 版本现已统一。
 

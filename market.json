@@ -3,7 +3,7 @@
   "name": "念风官方插件仓库",
   "repo": "https://github.com/nianfeng233/NianFeng-Chat-Plugins",
   "branch": "main",
-  "updatedAt": "2026-09-21T18:59:14.545Z",
+  "updatedAt": "2026-09-21T18:59:19.974Z",
   "plugins": [
     {
       "id": "github-hub",
@@ -134,7 +134,7 @@
       "id": "napcat-group-guard",
       "name": "群管助手",
       "displayName": "群管助手",
-      "version": "2.0.5",
+      "version": "2.0.6",
       "description": "NapCat 群自动管理扩展：只响应显式配置的群，未配置群完全忽略；入群申请自动审核（QQ 等级 / 进群白词黑词 / 共享黑名单）、申请 / 进出群档案图、退群或被踢与自动拉黑合并为一条提示、定期清理不活跃成员；支持模型主动把某群清理倒计时缩减为立即触发，并在每天约 20:00 播报下一轮清人时间与剩余天数；档案图由服务端渲染，不需要 WebUI 页面常驻。",
       "author": "念风扩展",
       "icon": "🛡️",
@@ -148,8 +148,8 @@
       "tags": [],
       "minAppVersion": "2.0.0",
       "hashType": "content-sha256",
-      "sha256": "08b6ff2ec9f4cb2e428c08fd1d48bdbf10e7f3bb54726915f24e08850ad5fb83",
-      "updatedAt": "2026-09-21T18:59:14.509Z",
+      "sha256": "498d7d0ced6ce7d1055ccebe4747002e639a752924795ab013307121f0e617a2",
+      "updatedAt": "2026-09-21T18:59:19.974Z",
       "repo": "https://github.com/nianfeng233/NianFeng-Chat-Plugins",
       "branch": "main",
       "homepage": "https://github.com/nianfeng233/NianFeng-Chat-Plugins/tree/main/plugins/napcat-group-guard",

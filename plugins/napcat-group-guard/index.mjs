@@ -29,7 +29,7 @@
  */
 
 export const name = 'napcat-group-guard'
-export const version = '2.0.4'
+export const version = '2.0.6'
 export const scope = 'both'
 export const displayName = '群管助手'
 export const description = '扩展 · NapCat 群自动管理：仅响应显式配置的群；入群申请自动审核（等级 / 白词 / 黑词 / 共享黑名单）、申请 / 进出群档案图与定时清理不活跃成员；退群 / 被踢与自动拉黑合并为一条提示；档案图服务端渲染，不需要 WebUI 页面常驻。'
