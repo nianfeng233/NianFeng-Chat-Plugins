@@ -29,7 +29,7 @@
  */
 
 export const name = 'napcat-group-guard'
-export const version = '2.0.0'
+export const version = '2.0.4'
 export const scope = 'both'
 export const displayName = '群管助手'
 export const description = '扩展 · NapCat 群自动管理：仅响应显式配置的群；入群申请自动审核（等级 / 白词 / 黑词 / 共享黑名单）、申请 / 进出群档案图与定时清理不活跃成员；退群 / 被踢与自动拉黑合并为一条提示；档案图服务端渲染，不需要 WebUI 页面常驻。'
@@ -1193,11 +1193,18 @@ export function apply(ctx) {
   }
 
   async function sendGroupText(instanceId, groupId, text, { atAll = false, action = 'notice' } = {}) {
-    const value = String(text ?? '')
+    let value = String(text ?? '')
     if (!value.trim()) return { ok: false, error: '消息内容为空。' }
     const segments = []
-    if (atAll) segments.push({ type: 'at', data: { qq: 'all' } })
-    segments.push({ type: 'text', data: { text: atAll ? ` ${value}` : value } })
+    if (atAll) {
+      // 文案模板默认自带「@全体成员」，而 atAll 还会插入一个真实 at segment；
+      // 不去掉文字里的前缀就会渲染成「@全体成员 @全体成员」，所以这里只保留一个。
+      value = value.replace(/^[ \t\u3000]*@全体成员[ \t\u3000]*/, '')
+      segments.push({ type: 'at', data: { qq: 'all' } })
+      if (value.trim()) segments.push({ type: 'text', data: { text: ` ${value}` } })
+    } else {
+      segments.push({ type: 'text', data: { text: value } })
+    }
     const result = await callOneBot(instanceId, 'send_group_msg', { group_id: String(groupId), message: segments })
     if (result.ok) emitAction(action, { groupId: String(groupId), atAll })
     return result
@@ -2376,13 +2383,11 @@ export function apply(ctx) {
     // NapCat 随后补发的 group_decrease(kick) 只消费标记，不重复发第二条。
     if (subType === 'kick' && (await consumeKickNoticeSent(instanceId, groupId, qq))) return
 
-    // 本插件清理批次踢的人：清理是否拉黑由 cleanup.blacklistKicked 决定，这里只
-    // 负责补一条“文本 + 档案图”合并的退群提示，不再走自动拉黑。
+    // 本插件清理批次踢的人：标记消费掉后直接返回，不再逐人补发“文本 + 档案图”。
+    // 执行清理的页面会在批次结束后统一发一条文本摘要，避免档案图刷屏。
     if (subType === 'kick' && (isRecentCleanupKick(groupId, qq) || (await isSharedCleanupKick(instanceId, groupId, qq)))) {
       CLEANUP_RECENT.delete(`${normalizeQq(groupId)}:${normalizeQq(qq)}`)
-      await sendDecreaseNotice(instanceId, groupId, { subType: 'cleanup', qq, rule }).catch(err =>
-        logger.warn(`[napcat-group-guard] 清理退群提示发送失败：${err?.message || err}`),
-      )
+      logger.debug?.(`[napcat-group-guard] 群 ${groupId} 清理踢出 ${qq}，等待批次汇总，不逐人发档案图。`)
       return
     }
 
@@ -2761,6 +2766,57 @@ export function apply(ctx) {
     }
   }
 
+  /**
+   * 直接执行「已发过预告、正在等待踢人」的待办，不再补发 @全体预告。
+   * 用于用户明确知道预告已经发过、只想让本次清理继续走完的场景。
+   */
+  async function kickPendingCleanupNow({ groupRef = '', context = null } = {}) {
+    if (!enabled()) return { ok: false, code: 'GG_DISABLED', error: '群管助手已禁用。' }
+    if (cleanupRunning || cleanupPerforming) return { ok: false, code: 'CLEANUP_BUSY', error: '正在执行另一轮清理，请稍后再试。' }
+    const resolved = await resolveRuleRef(groupRef, context)
+    if (!resolved.ok) return resolved
+    const channel = resolved.channel
+    if (!channel || !isGroupChannel(channel) || !instanceIdOf(channel)) {
+      return { ok: false, code: 'GROUP_NOT_CONFIGURED', error: `群 ${resolved.groupId} 没有对应的 NapCat 群聊渠道，无法执行清理。` }
+    }
+    const key = cleanupKey(instanceIdOf(channel), resolved.groupId)
+    const target = resolveCleanupTargets().find(item => item.key === key)
+    if (!target) {
+      return {
+        ok: false,
+        code: 'CLEANUP_DISABLED',
+        error: `群 ${resolved.groupId} 当前没有启用清理，无法执行清理踢人。`,
+      }
+    }
+    const pending = readPendingCleanups()
+    if (!pending[key]) {
+      return { ok: false, code: 'NO_PENDING', error: `群 ${resolved.groupId} 当前没有「已发预告、等待踢人」的清理待办，请使用 cleanup_trigger 或 cleanup_run 走完整流程。` }
+    }
+    // 把待办直接归零后交给正常踢人阶段：executePendingKick 不会再发 @全体预告，
+    // 只读取成员列表、执行批量踢人并播报结果 / 下一轮时间。
+    pending[key] = {
+      ...pending[key],
+      // 换一个 run seq 避免复用之前可能已被其它页面占用的租约。
+      seq: (Number(pending[key].seq) || 0) + 1,
+      kickAt: Date.now() - 1,
+    }
+    writePendingCleanups(pending)
+    const timer = cleanupKickTimers.get(key)
+    if (timer) {
+      ctx.clearTimeout(timer)
+      cleanupKickTimers.delete(key)
+    }
+    await executePendingKick(key)
+    return {
+      ok: true,
+      action: 'cleanup_kick',
+      group: { id: target.groupId, name: target.name },
+      inactive_days: target.cfg.inactiveDays,
+      message: `已立即执行「${target.name}」的清理踢人阶段（不再重新发送预告）。`,
+    }
+  }
+
+
   function filterInactiveMembers(members, cfg, target) {
     const nowSeconds = Math.floor(Date.now() / 1000)
     const thresholdSeconds = Math.max(0.01, Number(cfg.inactiveDays) || 30) * 86400
@@ -2874,6 +2930,9 @@ export function apply(ctx) {
     const entries = Object.values(pending)
     if (!entries.length) return { ok: true, skipped: true, reason: '没有未完成的清理阶段。' }
     const scheduled = []
+    const repaired = []
+    const runs = readCleanupRuns()
+    let runsChanged = false
     for (const item of entries) {
       const key = item.key || cleanupKey(item.instanceId, item.groupId)
       const target = findCleanupTarget(key)
@@ -2882,20 +2941,65 @@ export function apply(ctx) {
         continue
       }
       const kickAt = Number(item.kickAt) || Date.now() + 1500
+      const startedAt = Number(item.startedAt) || 0
+      const warnMs = Math.max(0, Number(target.cfg.warnMinutes) || 0) * 60000
+      // 正常待办只可能比开始时间晚「warnMinutes + 调度误差」；旧版 bug 会把它推迟到
+      // 下一个完整周期，间隔远大于此。检测到这种异常待办时不能傻等到下一周期，
+      // 清掉旧待办并写入 immediateAt，让正常流程立即补发新一轮预告，等待
+      // warnMinutes 后执行踢人。
+      const gapLimit = Math.max(warnMs + 30 * 60000, 2 * 60 * 60000)
+      const stale =
+        (startedAt > 0 && kickAt - startedAt > gapLimit) ||
+        kickAt > Date.now() + Math.max(24 * 60 * 60000, warnMs + 6 * 60 * 60000)
+      if (stale) {
+        delete pending[key]
+        runs[key] = {
+          ...(runs[key] && typeof runs[key] === 'object' ? runs[key] : {}),
+          immediateAt: Date.now() + 500,
+          advancedAt: Date.now(),
+          advancedBy: 'resume-stale',
+        }
+        runsChanged = true
+        repaired.push({ group_id: target.groupId, name: target.name, stale_kick_at: fmtTime(kickAt) || null })
+        continue
+      }
       const fireAt = kickAt > Date.now() ? kickAt : Date.now() + 1500
       schedulePendingKick(key, fireAt)
       scheduled.push({ group_id: target.groupId, name: target.name, kick_at: new Date(fireAt).toISOString() })
     }
+    if (runsChanged) writeState({ cleanupRuns: runs })
     writePendingCleanups(pending)
-    if (!scheduled.length) return { ok: true, skipped: true, reason: '原清理目标已不存在或已排除。' }
-    ctx.logger.info(`[napcat-group-guard] 已恢复未完成的清理踢人阶段（${scheduled.length} 个群）。`)
-    return { ok: true, resumed: true, targets: scheduled.length, pending: scheduled }
+    if (repaired.length) {
+      ctx.logger.warn(
+        `[napcat-group-guard] 检测到 ${repaired.length} 个异常清理待办（踢人时间被顺延到下一周期），已改为立即重新发预告，等待各自 warnMinutes 后执行。`,
+      )
+      refreshCleanupSchedule()
+    }
+    if (!scheduled.length && !repaired.length) return { ok: true, skipped: true, reason: '原清理目标已不存在或已排除。' }
+    if (scheduled.length) ctx.logger.info(`[napcat-group-guard] 已恢复未完成的清理踢人阶段（${scheduled.length} 个群）。`)
+    return { ok: true, resumed: true, targets: scheduled.length, pending: scheduled, repaired }
   }
 
   async function performCleanupTarget(target) {
     const cfg = target.cfg
     const fetched = await fetchGroupMembers(target.instanceId, target.groupId, { refresh: true })
     if (!fetched.ok) {
+      // 读取成员失败也必须给群里一个反应，否则用户只会看到“到点后无事发生”。
+      try {
+        await sendGroupText(
+          target.instanceId,
+          target.groupId,
+          `本次清理未能执行：读取群成员列表失败（${fetched.error || '未知原因'}），下一轮会继续尝试。`,
+          { action: 'cleanup_failed' },
+        )
+      } catch (err) {
+        ctx.logger.warn(`[napcat-group-guard] 群 ${target.groupId} 清理失败提示发送失败：${err?.message || err}`)
+      }
+      try {
+        await sendCleanupNextNotice(target)
+      } catch (err) {
+        ctx.logger.warn(`[napcat-group-guard] 群 ${target.groupId} 下一轮清理播报失败：${err?.message || err}`)
+      }
       return { group_id: target.groupId, group_name: target.name, ok: false, error: fetched.error, inactive_count: 0, kicked: [], failed: [] }
     }
     const inactive = filterInactiveMembers(fetched.members, cfg, target)
@@ -2915,11 +3019,22 @@ export function apply(ctx) {
       if (kickIntervalMs > 0 && inactive.length > 1) await sleep(kickIntervalMs)
     }
 
-    if (cfg.notifyResult && (kicked.length || failed.length)) {
-      const lines = [`本次清理完成：移出 ${kicked.length} 位长期未活跃成员。`]
-      if (kicked.length) lines.push(`已移出：${kicked.map(item => `${item.display}(${item.qq})`).join('、')}`)
-      if (failed.length) lines.push(`未能移出 ${failed.length} 位（可能是管理员 / 权限不足）。`)
-      await sendGroupText(target.instanceId, target.groupId, lines.join('\n'), { action: 'cleanup_result' })
+    // 清理结果统一合并为一条文本消息，不逐人发送档案图，避免群里刷屏。
+    // 勾选结果播报时，0 人也会明确回应；没勾选时只要踢了人也发一条摘要，
+    // 至少让群里知道本轮发生了什么。下一轮时间由下面的 nextNotice 单独播报。
+    const summaryLines = []
+    if (kicked.length || failed.length) {
+      summaryLines.push(`本次清理完成：移出 ${kicked.length} 位长期未活跃成员。`)
+      if (kicked.length) {
+        const names = kicked.slice(0, 50).map(item => `${item.display}(${item.qq})`).join('、')
+        summaryLines.push(`已移出：${names}${kicked.length > 50 ? ` 等 ${kicked.length} 人` : ''}`)
+      }
+      if (failed.length) summaryLines.push(`未能移出 ${failed.length} 位（可能是管理员 / 权限不足）。`)
+    } else if (cfg.notifyResult) {
+      summaryLines.push('本次清理完成：没有发现需要移出的长期未活跃成员。')
+    }
+    if (summaryLines.length) {
+      await sendGroupText(target.instanceId, target.groupId, summaryLines.join('\n'), { action: 'cleanup_result' })
     }
 
     // 无论是否开启结果摘要，踢完后都播报下一轮清理时间与剩余天数。
@@ -3019,6 +3134,13 @@ export function apply(ctx) {
         if (force || immediateCleanupAt(target) > 0) manualKeys.add(target.key)
       }
       const startedAt = Date.now()
+      // 必须在写入新锚点之前计算本轮的 18:00 踢人时刻。若先写 at=startedAt，
+      // 再调用 nextCleanupKickAtFor 就会把踢人时间推到“下一个周期”，表现为发完
+      // 预告后 10 分钟什么也不发生，待办一直被顺延。
+      const alignedKickAtByKey = new Map()
+      for (const target of activeDue) {
+        alignedKickAtByKey.set(target.key, manualKeys.has(target.key) ? 0 : nextCleanupKickAtFor(target))
+      }
       const runs = { ...readCleanupRuns() }
       for (const target of activeDue) runs[target.key] = { at: startedAt, seq: seqByKey.get(target.key) || 1 }
       writeState({ cleanupRuns: runs })
@@ -3029,7 +3151,7 @@ export function apply(ctx) {
         const warnMinutes = Math.max(0, Number(target.cfg.warnMinutes) || 0)
         let kickAt = startedAt + warnMinutes * 60000
         if (!manualKeys.has(target.key)) {
-          const alignedKickAt = nextCleanupKickAtFor(target)
+          const alignedKickAt = alignedKickAtByKey.get(target.key) || 0
           // 仍在本轮预告之后：按固定 18:00 执行；若已错过（离线补跑），
           // 退回到“发预告后等待 warnMinutes”，避免把踢人时间设到过去。
           if (alignedKickAt > startedAt) kickAt = alignedKickAt
@@ -3290,7 +3412,7 @@ export function apply(ctx) {
   async function toolGuard(args = {}, context = {}) {
     if (!enabled()) return disabledResult()
     const action = String(args?.action || 'status').trim() || 'status'
-    const mutating = ['blacklist_add', 'blacklist_remove', 'blacklist_kick', 'cleanup_run', 'cleanup_trigger', 'group_config_set', 'group_config_reset'].includes(action)
+    const mutating = ['blacklist_add', 'blacklist_remove', 'blacklist_kick', 'cleanup_run', 'cleanup_trigger', 'cleanup_kick', 'group_config_set', 'group_config_reset'].includes(action)
     if (mutating && !allowManage()) return manageDenied()
 
     if (action === 'status') return guardStatus()
@@ -3369,6 +3491,14 @@ export function apply(ctx) {
       })
     }
 
+    if (action === 'cleanup_kick') {
+      return kickPendingCleanupNow({
+        groupRef: String(args?.group ?? '').trim(),
+        context,
+      })
+    }
+
+
     if (action === 'group_config_get' || action === 'group_config_set' || action === 'group_config_reset') {
       const resolved = await resolveRuleRef(String(args?.group ?? '').trim(), context)
       if (!resolved.ok) return resolved
@@ -3420,18 +3550,18 @@ export function apply(ctx) {
 
   const guardToolDefinition = {
     description:
-      'NapCat 群管助手。status 查看当前配置与黑名单概况；blacklist_add / blacklist_remove / blacklist_list / blacklist_kick 管理共享黑名单（按 QQ 号精确匹配，加入后会自动踢出仍在群里的成员，并向关联群发拉黑提示）；group_config_get / group_config_set / group_config_reset 查看或按群覆盖独立规则（等级 / 白词 / 黑词 / 黑名单 / 进出群提示 / 清理参数等）；cleanup_preview 预览长期未活跃成员；cleanup_trigger 把当前群（或 group 指定群）的下一轮清理倒计时直接缩减为立即触发，随后插件按正常流程先 @全体预告、等待配置分钟数、再批量踢人，踢完播报下一轮时间；cleanup_run 兼容旧行为，手动强制所有启用清理的群立即走一轮。默认作用于当前群。',
+      'NapCat 群管助手。status 查看当前配置与黑名单概况；blacklist_add / blacklist_remove / blacklist_list / blacklist_kick 管理共享黑名单（按 QQ 号精确匹配，加入后会自动踢出仍在群里的成员，并向关联群发拉黑提示）；group_config_get / group_config_set / group_config_reset 查看或按群覆盖独立规则（等级 / 白词 / 黑词 / 黑名单 / 进出群提示 / 清理参数等）；cleanup_preview 预览长期未活跃成员；cleanup_trigger 把当前群（或 group 指定群）的下一轮清理倒计时直接缩减为立即触发，随后插件按正常流程先 @全体预告、等待配置分钟数、再批量踢人，踢完播报下一轮时间；cleanup_kick 直接执行“已发过预告、等待踢人”的待办，不再补发预告；cleanup_run 兼容旧行为，手动强制所有启用清理的群立即走一轮。默认作用于当前群。',
     parameters: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
-          enum: ['status', 'blacklist_list', 'blacklist_add', 'blacklist_remove', 'blacklist_kick', 'group_config_get', 'group_config_set', 'group_config_reset', 'cleanup_preview', 'cleanup_run', 'cleanup_trigger'],
+          enum: ['status', 'blacklist_list', 'blacklist_add', 'blacklist_remove', 'blacklist_kick', 'group_config_get', 'group_config_set', 'group_config_reset', 'cleanup_preview', 'cleanup_run', 'cleanup_trigger', 'cleanup_kick'],
           description: '要执行的动作，默认 status。',
         },
         qq: { type: 'string', description: 'blacklist_add / blacklist_remove：精确 QQ 号。' },
         list: { type: 'string', description: '黑名单名称；不传时按 group 对应规则或 default 处理。' },
-        group: { type: 'string', description: '群号或群名，默认当前群；group_config_* 用它指定要修改哪个群的规则，cleanup_trigger 用它指定提前触发哪个群。' },
+        group: { type: 'string', description: '群号或群名，默认当前群；group_config_* 用它指定要修改哪个群的规则，cleanup_trigger / cleanup_kick 用它指定目标群。' },
         reason: { type: 'string', description: 'blacklist_add：加入黑名单的原因，会写入运行日志与群内拉黑提示。' },
         kick: { type: 'boolean', description: 'blacklist_add 是否立刻踢出仍在群里的该成员，默认 true。' },
         notify: { type: 'boolean', description: 'blacklist_add 是否向使用该黑名单的群发送拉黑提示，默认 true。' },
@@ -3621,7 +3751,7 @@ export function apply(ctx) {
         text('cleanup.inactiveDays', '不活跃天数', '超过该天数视为不活跃', { type: 'number', width: 110 }) +
         bool('cleanup.skipAdmins', '跳过管理员', '群主始终跳过') +
         bool('cleanup.blacklistKicked', '清理对象加入黑名单', '默认关闭') +
-        bool('cleanup.notifyResult', '清理完成后播报', '在群里发送本次移出人数摘要') +
+        bool('cleanup.notifyResult', '清理完成后播报', '结果为 0 人时也发送摘要；实际移出时始终合并为一条文本，不逐人发档案图') +
         bool('cleanup.dailyBroadcast', '每天播报下一轮', '约 20:00 播报下一次清人日期、剩余天数与预计清理人数') +
         text('cleanup.dailyBroadcastHour', '每日播报小时', '0-23；留空继承全局，默认 20', { type: 'number', width: 90 }) +
         text('cleanup.dailyBroadcastMinute', '每日播报分钟', '0-59；留空继承全局，默认 0', { type: 'number', width: 90 }) +
@@ -3802,7 +3932,7 @@ export function apply(ctx) {
             settingsRow('不活跃天数', '群成员列表 last_sent_time（兜底 join_time）超过该天数视为不活跃', settingsInput('napcat.groupGuard.cleanup.inactiveDays', config.get('napcat.groupGuard.cleanup.inactiveDays', 30), { type: 'number', width: 110 })) +
             settingsRow('跳过管理员', '不清理群主（永远跳过）与管理员', settingsToggle('napcat.groupGuard.cleanup.skipAdmins', toBool(config.get('napcat.groupGuard.cleanup.skipAdmins'), true))) +
             settingsRow('清理对象加入黑名单', '关闭时清理踢出的人不会自动拉黑（默认关闭）', settingsToggle('napcat.groupGuard.cleanup.blacklistKicked', toBool(config.get('napcat.groupGuard.cleanup.blacklistKicked'), false))) +
-            settingsRow('清理完成后播报', '在群里发送本次移出人数摘要', settingsToggle('napcat.groupGuard.cleanup.notifyResult', toBool(config.get('napcat.groupGuard.cleanup.notifyResult'), false))) +
+            settingsRow('清理完成后播报', '结果为 0 人时也发送摘要；实际移出时始终合并为一条文本，不逐人发档案图', settingsToggle('napcat.groupGuard.cleanup.notifyResult', toBool(config.get('napcat.groupGuard.cleanup.notifyResult'), false))) +
             settingsRow('限定群', '留空 = 所有已配置的群聊渠道；也可填群号 / 群名（逗号或换行分隔）', settingsInput('napcat.groupGuard.cleanup.groups', config.get('napcat.groupGuard.cleanup.groups', ''), { width: 260, placeholder: '123456,789012' })) +
             settingsRow('预告文案', '支持 {minutes} {days} {group} {group_id}', settingsTextarea('napcat.groupGuard.cleanup.message', config.get('napcat.groupGuard.cleanup.message', DEFAULT_CLEANUP_MESSAGE), { rows: 3, width: 340 })) +
             settingsRow('每天晚上播报下一轮', '默认开启；约 20:00 播报下一次清人日期、剩余天数与当前预计清理人数，服务端代聊常驻即可补播一次', settingsToggle('napcat.groupGuard.cleanup.dailyBroadcast', toBool(config.get('napcat.groupGuard.cleanup.dailyBroadcast'), true))) +
@@ -3844,6 +3974,7 @@ export function apply(ctx) {
       previewCleanup,
       runCleanupCycle,
       triggerCleanup: triggerCleanupNow,
+      kickPendingCleanup: kickPendingCleanupNow,
       broadcastDailyCleanup: maybeBroadcastDailyCleanup,
       pollRequests: pollPendingRequests,
       resumePending: resumePendingCleanup,

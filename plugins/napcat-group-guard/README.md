@@ -110,7 +110,7 @@ powershell -ExecutionPolicy Bypass -File .\extensions\napcat-group-guard\install
 ### 方式 C：上传 zip 安装
 
 在 设置 → 插件 →「外部插件目录」一行点 **添加插件**，选择本目录下的
-`napcat-group-guard-v2.0.0.zip`；上传成功后插件会自动解压到服务器端外部插件目录，
+`napcat-group-guard-v2.0.4.zip`；上传成功后插件会自动解压到服务器端外部插件目录，
 按提示刷新页面即可。
 
 > 注意：zip 内已经是插件根目录结构（`napcat-group-guard/index.mjs` 等），不要再手动套一层文件夹。
@@ -319,3 +319,11 @@ guard.pollRequests()                           // 手动触发一次积压申请
 
 事件：`napcat-group-guard:action`，payload 形如
 `{ action: 'blacklist_add' | 'request_rejected' | 'request_approved' | 'kick' | 'cleanup_warning' | 'cleanup_done', ... }`。
+
+## 7. 最近更新
+
+- v2.0.1：修复清理预告重复 @ 全体成员；修复自动清理预告后踢人时间被顺延到下一轮的问题；清理 0 人 / 读取群成员失败时也会明确反馈。
+- v2.0.2：修复升级后恢复旧版异常待办时会傻等到下一个周期的问题；检测到被顺延的旧待办后会自动补发新一轮预告，等待配置的 `warnMinutes` 后执行。
+- v2.0.3：新增 `cleanup_kick`：已发过预告、正在等待踢人的待办可以直接执行，不再补发 @全体预告。
+- v2.0.4：不活跃清理踢出不再逐人发送档案图，改为批次结束后合并一条文本摘要，避免刷屏。
+
