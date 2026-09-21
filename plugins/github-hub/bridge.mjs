@@ -1050,15 +1050,20 @@ export function apply(ctx) {
     return claimedBy !== String(owner)
   }
 
-  const notificationMaxAgeMs = () =>
-    clampNumber(state.config.channels.maxPendingAgeMs, 60 * 1000, 7 * 24 * 60 * 60 * 1000, 30 * 60 * 1000)
+  const notificationMaxAgeMs = notification => {
+    const base = clampNumber(state.config.channels.maxPendingAgeMs, 60 * 1000, 7 * 24 * 60 * 60 * 1000, 30 * 60 * 1000)
+    // 测试通知只用于当场验证链路，过期后不再补投；否则一次 ack 失败会在
+    // 30 秒后重试，用户就会收到两条一模一样的测试消息。
+    if (String(notification?.kind || '') === 'test') return Math.min(base, 20000)
+    return base
+  }
 
   /* 通知生成后长时间没有运行时认领（休眠、后端离线、插件重装）时直接作废，
    * 避免睡醒之后一次性补发一堆过期动态。 */
   const notificationExpired = (notification, now = Date.now()) => {
     const at = Number(notification?.at) || 0
     if (!at) return false
-    return now - at > notificationMaxAgeMs()
+    return now - at > notificationMaxAgeMs(notification)
   }
 
   const expireNotification = (notification, now = Date.now(), reason = '超过可投递时限，已自动丢弃') => {
@@ -1363,32 +1368,60 @@ export function apply(ctx) {
     if (state.events.length > MAX_EVENTS) state.events.length = MAX_EVENTS
   }
 
-  /* Events API 的 summary PushEvent 不返回 commits / head_commit，
+  /* Events API 的 summary PushEvent 有时不返回 commits / head_commit，
    * 通知里就会缺提交数和最新提交说明；这里补一次只读查询。 */
   const enrichPushEvent = async (repoState, event) => {
     const repo = String(repoState?.repo || '')
     const before = String(event?.before || '')
     const head = String(event?.head || '')
-    if (!repo || !head) return
+    if (!repo || !head) {
+      event.enrichError = event.enrichError || '事件里缺少提交范围'
+      return
+    }
+    if (Number(event.commitCount) > 0 && event.commitMessage) return
+    let lastError = null
     if (before && !/^0+$/.test(before) && before !== head) {
       try {
         const compare = await githubJson(`/repos/${repo}/compare/${before}...${head}`)
         const total = Number(compare?.total_commits)
         if (Number.isFinite(total) && total >= 0) event.commitCount = total
         const commits = Array.isArray(compare?.commits) ? compare.commits : []
-        const last = commits[commits.length - 1]
-        if (last?.commit?.message) event.commitMessage = String(last.commit.message)
-        if (Number.isFinite(total) && total > 0) return
-      } catch (_) {
-        /* force push / 分支重建时 compare 可能 404，退回读取 head commit 元数据 */
+        if (commits.length) {
+          event.commits = commits.slice(-5).map(commit => ({
+            sha: String(commit?.sha || '').slice(0, 7),
+            message: String(commit?.commit?.message || ''),
+            url: String(commit?.html_url || ''),
+          }))
+          const last = commits[commits.length - 1]
+          if (last?.commit?.message) event.commitMessage = String(last.commit.message)
+          if (last?.html_url) event.commitUrl = String(last.html_url)
+        }
+        const fileCount = Number(compare?.files?.length)
+        if (Number.isFinite(fileCount) && fileCount > 0) event.changedFiles = fileCount
+        if (event.commitMessage) {
+          event.enrichError = ''
+          return
+        }
+      } catch (error) {
+        lastError = error
       }
     }
     try {
-      const commit = await githubJson(`/repos/${repo}/commits/${head}`)
-      if (commit?.commit?.message) event.commitMessage = String(commit.commit.message)
+      const commit = await githubJson(`/repos/${repo}/commits/${encodeURIComponent(head)}`)
+      const message = String(commit?.commit?.message || '')
+      if (message) event.commitMessage = message
       if (!Number(event.commitCount)) event.commitCount = 1
-    } catch (_) {
-      /* 查询失败就保持未知，通知里不显示“1 个提交”这种假数据 */
+      if (commit?.html_url) event.commitUrl = String(commit.html_url)
+      const files = Number(commit?.files?.length)
+      if (Number.isFinite(files) && files > 0) event.changedFiles = files
+      if (!event.commitAuthor && (commit?.commit?.author?.name || commit?.author?.login)) {
+        event.commitAuthor = String(commit?.commit?.author?.name || commit?.author?.login || '')
+      }
+      event.enrichError = ''
+    } catch (error) {
+      lastError = error || lastError
+      event.enrichError = prettyGithubError(lastError)
+      ctx.logger.debug(`[github-hub] ${repo} 提交详情补全失败：${event.enrichError}`)
     }
   }
 
@@ -2439,6 +2472,14 @@ export function apply(ctx) {
       const subscription = isObject(state.subscriptions[channelId]) ? state.subscriptions[channelId] : {}
       // 测试通知也要带上角色 id，后端与前端才能用同一份「插件启用」范围做最终拦截。
       const roleId = String(body.roleId || subscription.roleId || subscription.meta?.roleId || '').trim()
+      // 防止双击按钮 / 两个页面同时点测试导致同一渠道瞬间生成多条测试通知。
+      const recentTest = [...state.notifications]
+        .reverse()
+        .find(item => String(item?.kind || '') === 'test' && String(item?.target?.channelId || '') === channelId && Date.now() - (Number(item?.at) || 0) < 5000)
+      if (recentTest) {
+        httpApi.sendJson(res, 200, { ok: true, notification: recentTest, duplicate: true })
+        return
+      }
       const repo =
         normalizeRepoFullName(body.repo || '') ||
         Object.keys(subscription.repos || {})[0] ||

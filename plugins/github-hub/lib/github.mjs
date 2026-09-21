@@ -310,6 +310,12 @@ export const normalizeGithubEvent = raw => {
       const headCommit = payload.head_commit || commits[commits.length - 1] || {}
       const ref = String(payload.ref || '')
       const branch = ref.replace(/^refs\/heads\//, '').replace(/^refs\/tags\//, '')
+      const head = String(payload.after || headCommit.sha || '')
+      const before = String(payload.before || '')
+      const headMessage = String(headCommit.message || commits[commits.length - 1]?.message || '')
+      const commitUrl = head && repoUrl ? `${repoUrl}/commit/${encodeURIComponent(head)}` : String(headCommit.url || '').replace('api.github.com/repos', 'github.com').replace('/commits/', '/commit/')
+      const compareUrl = repoUrl && before && !/^0+$/.test(before) && before !== head ? `${repoUrl}/compare/${encodeURIComponent(before)}...${encodeURIComponent(head)}` : ''
+      const branchUrl = repoUrl ? `${repoUrl}/tree/${encodeURIComponent(branch)}` : ''
       return {
         ...base,
         kind: 'push',
@@ -317,14 +323,17 @@ export const normalizeGithubEvent = raw => {
         actionText: '分支更新',
         ref,
         branch,
-        /* Events API 的 summary payload 通常没有 size / commits；这里允许 0 表示未知，
+        /* Events API 的 summary payload 有时没有 size / commits；这里允许 0 表示未知，
          * 由后端桥再补一次 compare / commits 查询。不要默认写成 1 个提交。 */
-        commitCount: Number(payload.size ?? payload.distinct_size ?? commits.length) || 0,
-        before: String(payload.before || ''),
-        head: String(payload.after || ''),
-        commitMessage: String(headCommit.message || ''),
-        commitUrl: String(headCommit.url || '').replace('api.github.com/repos', 'github.com').replace('/commits/', '/commit/'),
-        url: repoUrl ? `${repoUrl}/tree/${encodeURIComponent(branch)}` : '',
+        commitCount: Number(payload.size ?? payload.distinct_size ?? commits.length) || (headMessage ? 1 : 0),
+        before,
+        head,
+        commitMessage: headMessage,
+        commitUrl,
+        compareUrl,
+        // 优先指向 compare / 具体提交，读不到提交时再退回分支页面。
+        url: compareUrl || commitUrl || branchUrl,
+        branchUrl,
         commits: commits.slice(0, 5).map(commit => ({
           sha: String(commit.sha || '').slice(0, 7),
           message: String(commit.message || ''),
@@ -494,7 +503,19 @@ export const eventToChannelText = (event, { maxChars = 900, timeZone = 'Asia/Sha
   if (event.kind === 'push') {
     const count = Number(event.commitCount) || 0
     lines.push(`分支：${event.branch || event.ref || '未知'}${count > 0 ? ` · ${count} 个提交` : ''}`)
-    if (event.commitMessage) lines.push(`最新提交：${shortBody(event.commitMessage, 160)}`)
+    const commits = (Array.isArray(event.commits) ? event.commits : []).filter(item => item && String(item.message || '').trim())
+    if (commits.length > 1) {
+      lines.push('提交列表：')
+      for (const commit of commits.slice(-3)) {
+        lines.push(`• ${commit.sha ? `${commit.sha} ` : ''}${shortBody(commit.message, 110)}`)
+      }
+    } else if (event.commitMessage) {
+      lines.push(`最新提交：${shortBody(event.commitMessage, 180)}`)
+    }
+    if (event.changedFiles) lines.push(`变更文件：${event.changedFiles} 个`)
+    if (!event.commitMessage && !commits.length && event.enrichError) {
+      lines.push(`提交详情读取失败：${shortBody(event.enrichError, 180)}`)
+    }
   }
   if (event.kind === 'release') {
     lines.push(`版本：${event.tag || event.name || '未命名'}${event.name && event.name !== event.tag ? `（${event.name}）` : ''}`)
@@ -515,7 +536,7 @@ export const eventToCardData = event => ({
   kind: event?.kind === 'issue_comment' ? 'issue_comment' : event?.kind || 'event',
   title: event?.title || event?.actionText || 'GitHub 动态',
   subtitle: `${event?.repo || ''}${event?.number ? ` #${event.number}` : ''}`.trim(),
-  description: event?.body || event?.commitMessage || '',
+  description: event?.body || event?.commitMessage || (event?.kind === 'push' && event?.enrichError ? `提交详情读取失败：${event.enrichError}` : ''),
   actor: event?.actor?.login || '',
   actorAvatar: event?.actor?.avatarUrl || '',
   time: event?.at || '',
@@ -523,7 +544,8 @@ export const eventToCardData = event => ({
   badge: event?.actionText || '',
   stats: event
     ? [
-        event.kind === 'push' ? { label: 'Commits', value: event.commitCount || 0 } : null,
+        event.kind === 'push' && Number(event.commitCount) > 0 ? { label: 'Commits', value: event.commitCount } : null,
+        event.kind === 'push' && Number(event.changedFiles) > 0 ? { label: 'Files', value: event.changedFiles } : null,
         event.kind === 'release' ? { label: 'Tag', value: event.tag || '' } : null,
         event.comments ? { label: 'Comments', value: event.comments } : null,
         event.additions !== undefined && event.kind === 'pull_request' ? { label: 'Changes', value: `+${event.additions}/-${event.deletions || 0}` } : null,

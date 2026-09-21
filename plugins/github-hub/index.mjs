@@ -13,7 +13,7 @@
  * 的 bridge.mjs 完成后端，Token 不进入前端。
  */
 export const name = 'github-hub'
-export const version = '2.0.1'
+export const version = '2.0.2'
 export const scope = 'both'
 export const displayName = 'GitHub 助手'
 export const description = 'GitHub 仓库订阅推送 · 链接项目卡片预览 · LLM 只读分析并回复 Issue（独立扩展）。'
@@ -531,18 +531,23 @@ export function apply(ctx) {
   /* ------------------------------------------------------------------ */
 
   const ackNotification = async (notification, ok, error = '') => {
-    try {
-      const result = await bridgeCall('POST', '/github-hub/notifications/ack', {
-        id: notification.id,
-        channelId: notification.target?.channelId || '',
-        ok,
-        error,
-      })
-      return result?.ok !== false
-    } catch (_) {
-      /* 通知会保留 claim，租约到期后由其它运行时或下一次轮询重试 */
-      return false
+    // 投递成功但 ack 因瞬时网络 / 后端重载丢失时，桥会认为通知未投递并在
+    // 30 秒后重试，用户就会收到重复消息。本地 ack 先做几次短重试。
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const result = await bridgeCall('POST', '/github-hub/notifications/ack', {
+          id: notification.id,
+          channelId: notification.target?.channelId || '',
+          ok,
+          error,
+        })
+        return result?.ok !== false
+      } catch (_) {
+        if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 700 * (attempt + 1)))
+      }
     }
+    /* 全部失败时通知会保留 claim，租约到期后由其它运行时或下一次轮询重试 */
+    return false
   }
 
   const deliverNotification = async notification => {

@@ -737,19 +737,28 @@ export function renderGithubHubPanel(container, helpers = {}) {
       return
     }
     if (action === 'test-notification') {
-      const channel = findChannel(channelId)
-      const roleId = String(channel?.meta?.roleId || '')
-      if (typeof allowsScope === 'function' && allowsScope({ channelId, roleId }) === false) {
-        return notify('warn', 'GitHub 助手在当前角色 / 渠道已被关闭，请先到「设置 → 插件启用」开启后再测试。')
+      // 防止双击 / 连续点击在短时间内生成多条测试通知。
+      if (target.dataset.testing === '1') return
+      target.dataset.testing = '1'
+      target.setAttribute('disabled', 'disabled')
+      try {
+        const channel = findChannel(channelId)
+        const roleId = String(channel?.meta?.roleId || '')
+        if (typeof allowsScope === 'function' && allowsScope({ channelId, roleId }) === false) {
+          return notify('warn', 'GitHub 助手在当前角色 / 渠道已被关闭，请先到「设置 → 插件启用」开启后再测试。')
+        }
+        const result = await api('POST', '/github-hub/test-notification', {
+          channelId,
+          roleId,
+          name: channel?.name || channelId,
+          type: channel?.type || '',
+        })
+        if (result?.ok === false) notify('error', result.error || '测试通知失败')
+        else notify('success', '测试通知已进入投递队列；如果渠道正常，几秒内会收到')
+      } finally {
+        target.removeAttribute('disabled')
+        delete target.dataset.testing
       }
-      const result = await api('POST', '/github-hub/test-notification', {
-        channelId,
-        roleId,
-        name: channel?.name || channelId,
-        type: channel?.type || '',
-      })
-      if (result?.ok === false) notify('error', result.error || '测试通知失败')
-      else notify('success', '测试通知已进入投递队列；如果渠道正常，几秒内会收到')
       return
     }
     if (action === 'block-user') {

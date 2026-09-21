@@ -2,7 +2,7 @@
   "id": "github-hub",
   "name": "github-hub",
   "displayName": "GitHub 助手",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "author": "念风扩展",
   "description": "GitHub 仓库订阅推送、聊天内项目卡片预览、LLM 只读分析并回复 Issue、自主动态屏蔽刷屏用户。独立扩展，不修改本体。",
   "entry": "./index.mjs",
@@ -35,7 +35,7 @@
   "provides": [],
   "distribution": {
     "directory": "extensions/github-hub",
-    "zip": "github-hub-v2.0.1.zip",
+    "zip": "github-hub-v2.0.2.zip",
     "placement": "外部插件：<数据目录>/plugins/github-hub/（也可在「设置 → 插件 → 添加插件」里直接上传 zip）。安装后到「设置 → 插件」点一次「重新扫描」，新版内核会同时热加载后端桥。"
   },
   "scope": "both"

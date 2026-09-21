@@ -5,6 +5,7 @@
 import assert from 'node:assert/strict'
 import {
   eventToChannelText,
+  eventToCardData,
   extractGithubUrls,
   formatEventTime,
   normalizeEventFilters,
@@ -142,6 +143,51 @@ test('PushEvent 有真实提交数和说明时正常展示', () => {
   assert.match(text, /2 个提交/)
   assert.match(text, /最新提交：fix: 时间戳/)
 })
+
+test('PushEvent 带 after / commits 时生成提交链接并展示提交列表', () => {
+  const push = normalizeGithubEvent({
+    id: 'e6',
+    type: 'PushEvent',
+    created_at: '2026-09-17T17:09:57Z',
+    actor: { login: 'alice' },
+    repo: { name: 'a/b', url: 'https://api.github.com/repos/a/b' },
+    payload: {
+      ref: 'refs/heads/main',
+      before: '1111111',
+      after: '2222222',
+      size: 2,
+      commits: [
+        { sha: 'abc1234', message: 'feat: 第一个提交', url: 'https://api.github.com/repos/a/b/commits/abc1234' },
+        { sha: 'def5678', message: 'fix: 第二个提交', url: 'https://api.github.com/repos/a/b/commits/def5678' },
+      ],
+    },
+  })
+  assert.equal(push.head, '2222222')
+  assert.equal(push.commitCount, 2)
+  assert.equal(push.url, 'https://github.com/a/b/compare/1111111...2222222')
+  const text = eventToChannelText(push)
+  assert.match(text, /提交列表/)
+  assert.match(text, /feat: 第一个提交/)
+  assert.match(text, /fix: 第二个提交/)
+  const card = eventToCardData(push)
+  assert.equal(card.url, 'https://github.com/a/b/compare/1111111...2222222')
+  assert.equal(card.stats.some(item => item.label === 'Commits' && item.value === 2), true)
+})
+
+test('PushEvent 只有 head_commit 时也保留提交说明，不丢内容', () => {
+  const push = normalizeGithubEvent({
+    id: 'e7',
+    type: 'PushEvent',
+    created_at: '2026-09-17T17:09:57Z',
+    actor: { login: 'alice' },
+    repo: { name: 'a/b', url: 'https://api.github.com/repos/a/b' },
+    payload: { ref: 'refs/heads/main', after: 'abc9999', head_commit: { message: 'docs: 补充说明' } },
+  })
+  assert.equal(push.commitCount, 1)
+  assert.equal(push.commitMessage, 'docs: 补充说明')
+  assert.match(eventToChannelText(push), /最新提交：docs: 补充说明/)
+})
+
 
 test('SVG 卡片生成且带转义', () => {
   const repoCard = renderRepoCard({ full_name: 'a/b', description: '<hello> & world', html_url: 'https://github.com/a/b', owner: { login: 'a', avatar_url: '' }, stargazers_count: 3, forks_count: 1, open_issues_count: 2, language: 'JavaScript', topics: ['test'] })
