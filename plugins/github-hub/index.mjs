@@ -13,7 +13,7 @@
  * 的 bridge.mjs 完成后端，Token 不进入前端。
  */
 export const name = 'github-hub'
-export const version = '2.0.2'
+export const version = '2.0.3'
 export const scope = 'both'
 export const displayName = 'GitHub 助手'
 export const description = 'GitHub 仓库订阅推送 · 链接项目卡片预览 · LLM 只读分析并回复 Issue（独立扩展）。'
@@ -595,6 +595,12 @@ export function apply(ctx) {
         return
       }
       scopeContext.conversationId = conversationId
+      // QQ 官方机器人外发需要 passive msg_id 或主动消息额度；先让
+      // session-service 补一页最近消息，qqbot 才能从最近入站消息里拿到
+      // msg_id 走被动回复，减少冷通知只能走主动消息导致的失败。
+      if (String(channel.type || '').toLowerCase() === 'qqbot' && typeof sessions.ensureMessages === 'function') {
+        await sessions.ensureMessages(conversationId, { limit: 20 }).catch(() => null)
+      }
       const channelBase = getChannelBase()
       const canOutbound = channelBase?.hasOutbound ? channelBase.hasOutbound(channel.type) : true
 

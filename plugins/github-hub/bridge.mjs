@@ -1253,11 +1253,16 @@ export function apply(ctx) {
     const now = Date.now()
     repos.forEach((repo, index) => {
       const current = isObject(state.repos[repo]) ? state.repos[repo] : {}
+      const processedEvent = Number(current.lastEventAt) > 0
+      const existingSinceAt = Number(current.sinceAt) || 0
       state.repos[repo] = {
         ...current,
         repo,
         monitored: true,
-        sinceAt: Number(current.sinceAt) || now,
+        // 只有已经成功处理过事件时才沿用 sinceAt。
+        // 从未处理过事件时保持 0：即使代理不通、用户反复保存设置，
+        // 也不会把 sinceAt 推到“未来”，导致刚 Push 的事件被当成旧事件跳过。
+        sinceAt: processedEvent ? existingSinceAt : 0,
         etag: String(current.etag || ''),
         seenIds: Array.isArray(current.seenIds) ? current.seenIds.slice(-MAX_SEEN_IDS) : [],
         lastCheckedAt: Number(current.lastCheckedAt) || 0,
@@ -1444,17 +1449,23 @@ export function apply(ctx) {
     for (const raw of rawEvents) {
       const id = String(raw?.id || '')
       if (!id || seen.has(id)) continue
-      seen.add(id)
       const at = Date.parse(String(raw?.created_at || '')) || 0
-      if (!sinceAt || at >= sinceAt - 5000) {
-        /* 机器休眠 / 插件重装 / 状态文件丢失后，GitHub 仍会返回订阅以来的历史事件。
-         * 超过阈值的事件只记录 seen，不再通知，避免“今天什么也没干却收到旧推送”。 */
-        if (at && now - at > maxEventAgeMs) {
-          staleSkipped += 1
-          continue
-        }
-        fresh.push(raw)
+      // 早于本次订阅游标的历史事件只记 seen，避免反复回放。
+      if (sinceAt && at && at < sinceAt - 5000) {
+        seen.add(id)
+        continue
       }
+      /* 机器休眠 / 插件重装 / 状态文件丢失 / GitHub PushEvent 延迟时，
+       * GitHub 可能晚一些才返回已经发生过的 PushEvent。
+       * 这类“暂时太旧”的事件先不写入 seen：用户之后调大旧事件补发上限，
+       * 或者等 GitHub 把 PushEvent 补出来，仍然可以被正常补发。
+       * 只有真正处理过的事件才进入 seenIds。 */
+      if (at && now - at > maxEventAgeMs) {
+        staleSkipped += 1
+        continue
+      }
+      seen.add(id)
+      fresh.push(raw)
     }
     repoState.seenIds = [...seen].slice(-MAX_SEEN_IDS)
     const normalized = fresh.map(raw => normalizeGithubEvent(raw)).filter(Boolean).sort((a, b) => a.time - b.time)
@@ -1472,9 +1483,12 @@ export function apply(ctx) {
       const latestTime = normalized.reduce((max, event) => Math.max(max, Number(event.time) || 0), 0)
       if (latestTime) repoState.sinceAt = Math.max(Number(repoState.sinceAt) || 0, latestTime)
     }
+    if (normalized.length) {
+      ctx.logger.info(`[github-hub] ${repoState.repo} 处理 ${normalized.length} 条新事件`)
+    }
     if (staleSkipped) {
       ctx.logger.info(
-        `[github-hub] ${repoState.repo} 跳过 ${staleSkipped} 条超过 ${Math.round(maxEventAgeMs / 60000)} 分钟的旧事件`,
+        `[github-hub] ${repoState.repo} 暂缓 ${staleSkipped} 条超过 ${Math.round(maxEventAgeMs / 60000)} 分钟的旧事件（调大补发上限后可重试）`,
       )
     }
     return normalized.length
