@@ -27,6 +27,9 @@ import {
 } from './lib/github.mjs'
 import { formatTime, relativeTime, truncate } from './lib/util.mjs'
 
+/** 面板版本：更新后可直接在标题里看到，避免浏览器 / 模块缓存导致分不清加载的是哪版。 */
+const PANEL_VERSION = '2.0.5'
+
 const AUTO_MODES = [
   { value: 'off', label: '关闭：只通知，不分析' },
   { value: 'draft', label: '草稿：分析后通知我确认（推荐）' },
@@ -335,7 +338,26 @@ export function renderGithubHubPanel(container, helpers = {}) {
   const pollNow = async () => {
     const result = await api('POST', '/github-hub/poll', {})
     if (result?.ok === false) return notify('error', result.error || '检查失败')
-    notify('success', result.checked ? `已检查 ${result.checked} 个仓库` : '检查完成，没有已订阅仓库')
+    if (result?.skipped) {
+      notify('warn', '后端正在检查中，请等几秒再点一次「立即检查」')
+      await loadAll()
+      return
+    }
+    if (result?.rateLimited) {
+      const resetAt = Number(result.resetAt) || 0
+      notify('warn', `GitHub API 限额已用完${resetAt ? `，约 ${formatTime(resetAt).slice(11)} 恢复` : ''}`)
+      await loadAll()
+      return
+    }
+    const checked = Number(result?.checked) || 0
+    const newEvents = Number(result?.newEvents) || 0
+    const errors = Number(result?.errors) || 0
+    if (!checked) {
+      const monitored = Number(state.status?.monitoredRepos?.length) || 0
+      notify('warn', monitored ? `当前监控 ${monitored} 个仓库，但本轮没有实际检查；可能是轮询被跳过，请稍后再试` : '当前没有已订阅仓库，请先到下方「渠道订阅」添加仓库')
+    } else {
+      notify('success', `已检查 ${checked} 个仓库，发现 ${newEvents} 条新事件${errors ? `，${errors} 个错误` : ''}`)
+    }
     await loadAll()
   }
 
@@ -671,7 +693,7 @@ export function renderGithubHubPanel(container, helpers = {}) {
     container.innerHTML = `
       <div class="ghh-head">
         <div>
-          <div class="settings-title">GitHub 助手</div>
+          <div class="settings-title">GitHub 助手 <span class="ghh-dim" style="font-size:12px">v${PANEL_VERSION}</span></div>
           <div class="settings-desc">订阅仓库动态推送到渠道 · 聊天链接自动预览项目 · LLM 只读分析并回复 Issue</div>
         </div>
         <div class="ghh-actions">${button('刷新', 'refresh')}${button('立即检查', 'poll-now', { variant: 'primary' })}</div>
