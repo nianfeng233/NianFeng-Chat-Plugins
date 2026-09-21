@@ -1,0 +1,38 @@
+{
+  "id": "napcat-like",
+  "name": "napcat-like",
+  "displayName": "NapCat 点赞助手",
+  "version": "2.0.0",
+  "author": "念风扩展",
+  "description": "NapCat 渠道扩展：每天 00:00 自动给指定 QQ 列表点赞；为指定群开启「赞我」指令（可配置群等级门槛、等级不足回复、成功回复等）；同时在不修改本体源码的前提下，为 chat_send 扩展 qq / group 参数，可直接向指定 QQ 或群号发送消息。",
+  "entry": "./index.mjs",
+  "backend": "./bridge.mjs",
+  "icon": "👍",
+  "color": "#f59e0b",
+  "type": "extension",
+  "core": false,
+  "permissions": [
+    "network"
+  ],
+  "depends": {
+    "channel-registry": "^1.0.0",
+    "config": ">=1.1.0",
+    "event-bus": "*",
+    "napcat": "^1.0.0",
+    "tool-registry": "^1.0.0"
+  },
+  "optionalDepends": {
+    "backend-client": ">=1.0.0",
+    "plugin-manager": ">=1.0.0",
+    "toast-host": ">=1.0.0"
+  },
+  "provides": [
+    "napcat-like"
+  ],
+  "distribution": {
+    "directory": "extensions/napcat-like",
+    "zip": "napcat-like-v2.0.0.zip",
+    "placement": "外部插件：<数据目录>/plugins/napcat-like/；需与内置 NapCat 渠道插件配合使用，也可在「设置 → 插件 → 添加插件」里直接上传 zip 安装"
+  },
+  "scope": "both"
+}
