@@ -8,11 +8,13 @@ import {
   eventToCardData,
   extractGithubUrls,
   formatEventTime,
+  githubRawEventKey,
   normalizeEventFilters,
   normalizeGithubEvent,
   normalizeRepoFullName,
   parseGithubUrl,
   resolveRepoAndNumber,
+  webhookEventToRaw,
 } from './lib/github.mjs'
 import { renderIssueCard, renderRepoCard, cardAsImage, svgToDataUrl, previewToText } from './lib/card.mjs'
 import { wrapByWidth } from './lib/util.mjs'
@@ -103,6 +105,58 @@ test('normalizeGithubEvent 解析 IssuesEvent / PushEvent / ReleaseEvent', () =>
   })
   assert.equal(releaseEvent.kind, 'release')
   assert.match(eventToChannelText(releaseEvent), /v1.0.0/)
+})
+
+test('Webhook payload 转 Events API 结构，并与轮询事件使用同一个稳定 key', () => {
+  const updatedAt = '2026-09-22T00:00:00Z'
+  const apiEvent = {
+    id: '12345',
+    type: 'IssuesEvent',
+    created_at: updatedAt,
+    actor: { login: 'alice' },
+    repo: { name: 'a/b', url: 'https://api.github.com/repos/a/b' },
+    payload: {
+      action: 'opened',
+      issue: { id: 77, number: 5, title: 'webhook', body: 'body', html_url: 'https://github.com/a/b/issues/5', state: 'open', updated_at: updatedAt },
+    },
+  }
+  const webhookRaw = webhookEventToRaw({
+    event: 'issues',
+    deliveryId: 'delivery-123',
+    payload: {
+      action: 'opened',
+      repository: { full_name: 'a/b', url: 'https://api.github.com/repos/a/b' },
+      sender: { login: 'alice' },
+      issue: { id: 77, number: 5, title: 'webhook', body: 'body', html_url: 'https://github.com/a/b/issues/5', state: 'open', updated_at: updatedAt },
+    },
+  })
+  assert.equal(webhookRaw.type, 'IssuesEvent')
+  assert.equal(githubRawEventKey(webhookRaw), githubRawEventKey(apiEvent))
+  const normalized = normalizeGithubEvent(webhookRaw)
+  assert.equal(normalized.kind, 'issue')
+  assert.equal(normalized.apiId, 'delivery-123')
+  assert.equal(normalized.source, 'events')
+  assert.match(normalized.id, /a\/b:issues:5:opened:/)
+})
+
+test('Star Webhook 能区分 Star / 取消 Star', () => {
+  const created = normalizeGithubEvent(
+    webhookEventToRaw({
+      event: 'star',
+      deliveryId: 'star-1',
+      payload: { action: 'created', repository: { full_name: 'a/b' }, sender: { id: 9, login: 'bob' } },
+    }),
+  )
+  const deleted = normalizeGithubEvent(
+    webhookEventToRaw({
+      event: 'star',
+      deliveryId: 'star-2',
+      payload: { action: 'deleted', repository: { full_name: 'a/b' }, sender: { id: 9, login: 'bob' } },
+    }),
+  )
+  assert.equal(created.kind, 'star')
+  assert.equal(created.actionText, '收到新的 Star')
+  assert.equal(deleted.actionText, '取消了 Star')
 })
 
 test('formatEventTime 把 GitHub UTC 时间转成 Asia/Shanghai 并带时区', () => {

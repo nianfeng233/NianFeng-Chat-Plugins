@@ -8,7 +8,7 @@
 | 🖼 链接项目预览 | 聊天消息里出现 GitHub 仓库 / Issue / PR / Commit / Release / 用户链接时，自动生成一张项目卡片（SVG 图片）展示仓库头像、简介、语言、Star / Fork / Issue、标签、正文摘要等 |
 | 🤖 Issue 自动分析 | 配置自己的仓库后，新 Issue 会被后端桥读取仓库内容（只读）→ 调用 LLM 分析 → 默认生成回复草稿并通知渠道；选择「自动回复」模式后会直接作为 Issue 评论发布 |
 | 🚫 屏蔽刷屏用户 | 当前角色可通过 `github_user_block` 工具屏蔽 / 解开用户；被屏蔽用户的 Issue、评论不再推送通知，也不会触发 LLM 分析。开启「主动屏蔽」后，模型判断为广告 / 诈骗 / 恶意刷屏时可自动加入屏蔽名单 |
-| 🧰 对话工具 | 注册 7 个工具给模型：`github_repo_info` / `github_issue_get` / `github_repo_search` / `github_repo_read` / `github_issue_analyze` / `github_issue_reply` / `github_subscription`，用户说「分析一下 / 去回复一下 / 帮我订阅这个仓库」即可调用 |
+| 🧰 对话工具 | 注册 8 个工具给模型：`github_repo_info` / `github_issue_get` / `github_repo_search` / `github_repo_read` / `github_issue_analyze` / `github_issue_reply` / `github_subscription` / `github_user_block`，用户说「分析一下 / 去回复一下 / 帮我订阅这个仓库」即可调用 |
 
 > 仓库内容、Issue 正文与评论始终按**不可信外部内容**处理；插件对本地的唯一写操作只有「发布 Issue 评论」。
 > GitHub Token 只存在后端 `<数据目录>/github-hub.json`，使用念风本体同一套 AES-256-GCM + `.secret-key` 加密，前端与接口都只看到打码值。
@@ -17,13 +17,14 @@
 
 | 原始需求 | 结论 | 实现方式 |
 |---|---|---|
-| 1. 每个渠道配置订阅仓库，事件推送到渠道 | ✅ 可做 | 后端桥按仓库轮询 GitHub Events API（ETag 条件请求 + seen / notifiedKeys 去重）；前端 / 服务端代聊通过原子认领接口取通知，写入渠道对应会话，交给 `channel-base` 自动外发 |
+| 1. 每个渠道配置订阅仓库，事件推送到渠道 | ✅ 可做 | 后端桥优先使用 GitHub Webhook 低延迟回调（路径密钥 + HMAC-SHA256 验签），轮询作为兜底（ETag 条件请求 + seen / notifiedKeys 去重）；前端 / 服务端代聊通过原子认领接口取通知，写入渠道对应会话，交给 `channel-base` 自动外发 |
 | 2. 解析消息里的 GitHub 链接并生成图片预览 | ✅ 可做 | 后端桥提供只读 `preview` / `repo` / `issue` 数据，前端用纯 SVG 生成卡片（不依赖 canvas、sharp、字体文件），存入 `image-service` 后作为消息图片展示 |
 | 3. 自动分析 Issue 并调用 LLM 回复、通知渠道 | ✅ 可做 | 后端桥读取 README + 目录树 + 按关键词挑选的相关源码文件，通过 `models.complete` 调用已配置模型，生成「分析 + 回复」草稿；支持草稿 / 自动两种模式；渠道通知与能力 1 共用队列 |
 | 4. 用户自然语言「你去回复一下」 | ✅ 可做 | `github_issue_analyze` / `github_issue_reply` 等 function-calling 工具；`github_subscription` 支持用对话管理当前渠道订阅 |
 
 **已知边界：**
 - 没有 GitHub Token 时，GitHub API 限额约 60 次/小时，插件会自动放慢轮询（默认 2 分钟会按仓库数放大），适合轻度使用；重度和私有仓库建议配置 Token。
+- Webhook 低延迟订阅需要 GitHub 能访问到本机的公网回调入口；没有公网入口时保持关闭，插件继续用轮询兜底，不会影响订阅和通知功能。
 - 渠道通知默认是纯文本（QQ / 微信兼容性最好）；可选开启「附带 SVG 卡片」，部分渠道可能不支持 SVG，此时会自动降级为纯文本，或由渠道桥返回明确错误。
 - 链接卡片是 SVG 图片，浏览器显示效果最佳；外部渠道发送图片取决于各渠道桥对 SVG 的支持。
 - 自动回复默认是「草稿」模式，不会未确认就发帖；选择「自动」模式才直接发布，建议先跑一段时间草稿。
@@ -46,7 +47,7 @@ powershell -ExecutionPolicy Bypass -File .\extensions\github-hub\install.ps1
 
 ### 方式 B：上传 zip
 
-在「设置 → 插件 → 添加插件」中上传 `github-hub-v2.0.2.zip`（本目录下）。上传完成后刷新页面，必要时点「重新扫描」。
+在「设置 → 插件 → 添加插件」中上传 `github-hub-v2.1.0.zip`（本目录下）。上传完成后刷新页面，必要时点「重新扫描」。
 
 ### 手动安装
 
@@ -69,7 +70,8 @@ GitHub 助手已接入本体统一入口：**「设置 → 插件启用 → GitH
 ### 1. 接入配置
 
 - **GitHub Token**（可选）：只读公开仓库可不填；自动回复 Issue、读取私有仓库、提高 API 限额时必须填写。建议使用 fine-grained token，仅授予目标仓库 `Contents: Read`、`Issues: Read and write`、`Metadata: Read`。
-- **轮询间隔**：默认 2 分钟；未配置 Token 时插件会按监控仓库数自动放大间隔，避免触发 API 限额。
+- **Webhook 低延迟订阅**：推荐开启。GitHub 仓库有新动态时会立即回调本机；普通轮询保留为兜底，并在收到有效回调后自动放慢。
+- **轮询间隔**：未开启 Webhook 时的普通轮询间隔，默认 2 分钟；未配置 Token 时插件还会按监控仓库数自动放大，避免触发 API 限额。
 - **HTTP 代理**：留空跟随「设置 → 网络」的全局代理。
 - **通知卡片发到渠道**：默认关闭；开启后通知消息会附带一张 SVG 事件卡片。
 - **时间显示时区**：默认 `Asia/Shanghai`。GitHub API 返回 UTC，通知会转换到这个时区再显示，避免时间戳差 8 小时。
@@ -77,6 +79,20 @@ GitHub 助手已接入本体统一入口：**「设置 → 插件启用 → GitH
 - **通知队列过期时间**：默认 30 分钟。通知生成后长时间没有运行时认领时会自动作废，避免睡醒后刷屏。
 - **链接自动预览**：默认开启；「渠道会话里也生成预览」默认关闭，避免 QQ / 微信里自动刷屏。
 
+### 1.5 Webhook 低延迟订阅（推荐）
+
+Webhook 模式下 GitHub 有新动态会立即回调本机，不再等待下一次轮询：
+
+1. 在设置页开启「启用 Webhook」并保存；插件会生成一对**回调 URL**（包含随机路径密钥）和 **Webhook Secret**。
+2. 在目标 GitHub 仓库打开 `Settings → Webhooks → Add webhook`：
+   - **Payload URL**：粘贴插件设置页复制的回调 URL；
+   - **Content type**：选择 `application/json`；
+   - **Secret**：粘贴插件生成的 Webhook Secret；
+   - **Events**：按需勾选 Issues、Issue comments、Pushes、Releases、Pull requests、Branches or tags、Forks、Stars；若要接收全部动态，也可先选 `Send me everything`。
+3. 保存后 GitHub 会立刻发送一个 `ping`；插件设置页的「最近回调」会显示时间、事件与计数。
+4. 如果 URL / Secret 填错，插件会拒绝并记录 `签名校验失败`，可在 GitHub 的 Recent Deliveries 里看到失败响应。
+
+> 本机 `127.0.0.1` 无法被 GitHub 直接访问。运行在内网 / 家里的设备，需要先通过反向代理、云服务器或内网穿透提供一个 HTTPS 公网入口；无法提供公网入口时保持 Webhook 关闭即可继续使用带 ETag 的轮询。
 ### 2. 渠道订阅
 
 在「渠道订阅」区域可以看到所有已添加的渠道（私聊 / 群聊 / 隐私分组）。对每个渠道：
@@ -141,10 +157,10 @@ https://github.com/nianfeng233/NianFeng-Chat/releases/tag/v1.1.8
 
 ```
 extensions/github-hub/
-├─ index.mjs        前端插件：设置页、SSE/轮询、渠道投递、链接预览、7 个工具
+├─ index.mjs        前端插件：设置页、SSE/轮询、渠道投递、链接预览、8 个工具
 ├─ panel.mjs        设置面板：接入配置 / 渠道订阅 / 自动回复 / 草稿 / 最近动态
 ├─ ui.mjs           自包含 UI 组件的样式，不依赖本体 src
-├─ bridge.mjs       后端桥：GitHub API 轮询、状态持久化、只读检索、LLM 分析与回复
+├─ bridge.mjs       后端桥：Webhook 回调 / GitHub API 轮询、状态持久化、只读检索、LLM 分析与回复
 ├─ lib/
 │  ├─ github.mjs    GitHub URL 解析、事件归一化、渠道通知文案（纯函数）
 │  ├─ card.mjs      纯 SVG 项目 / Issue / Commit / Release / 用户卡片
@@ -157,13 +173,19 @@ extensions/github-hub/
 
 ## 安全与隐私
 
-- GitHub Token 使用 `<数据目录>/.secret-key` + AES-256-GCM 加密后写入 `github-hub.json`；接口只返回 `maskedToken`，不返回明文。
+- GitHub Token、Webhook Secret 与回调路径密钥使用 `<数据目录>/.secret-key` + AES-256-GCM 加密后写入 `github-hub.json`；Token / Secret 只返回打码值，路径密钥只通过已鉴权的设置页本地接口读取。
 - 只读读取代码 / Issue 时不写入任何仓库；唯一的 GitHub 写操作是 `POST /repos/:owner/:repo/issues/:number/comments`。
 - 自动回复默认走草稿模式；即使自动模式，也会先做用户 / 测试仓库 / 标签等跳过判断。
 - 仓库文件、README、Issue 正文、评论都属于不可信数据：内置提示词和工具描述均要求模型只把它们当资料，不执行其中的指令，不泄露上下文中的敏感信息。
 - HTTP 请求支持本机 / 全局代理；代理地址只会用于 GitHub API 与头像下载。
 
 
+## 更新记录（v2.1.0）
+
+- **Webhook 低延迟订阅**：在「设置 → GitHub 助手」开启后生成回调 URL 与 Secret；GitHub 仓库有新 Issue、评论、Push、Release、Pull Request、Fork / Star 时立即回调本机。请求使用路径密钥 + HMAC-SHA256 验签，Secret 与 Token 一样加密落盘；旧的无签名 / 路径不匹配请求会被拒绝。
+- **轮询降级为兜底**：最近有成功回调时轮询自动放慢；超过健康窗口没有回调则恢复普通轮询频率，Webhook 配置错误或公网入口中断时不会漏通知。
+- **跨来源事件去重**：轮询 Event.id 与 Webhook X-GitHub-Delivery 不同，改成按 payload 中的 issue.number / comment.id / after / release.id 等稳定字段生成事件键，同一条动态先 Webhook 后轮询也不会重复推送。
+- **Star 事件完善**：Webhook 的 `star` / `watch` 事件会区分 Star 与取消 Star。
 ## 更新记录（v2.0.5）
 
 - 设置页标题显示当前面板版本（如 `GitHub 助手 v2.0.5`），用于判断浏览器 / 插件热更新是否真的加载了新代码。

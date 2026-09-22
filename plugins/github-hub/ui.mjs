@@ -159,6 +159,15 @@ export const PANEL_CSS = `
 .ghh-scope-item:hover { background:rgba(110,119,129,.08); }
 .ghh-scope-item input { accent-color:var(--accent-color,#4f8f3f); flex:none; }
 .ghh-scope-name { font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+/* Webhook 设置有一长串 URL / Secret 控件，窄屏下必须改成上下堆叠，避免左侧标题被挤成竖排。 */
+.ghh-webhook .setting-row { flex-direction:column; align-items:stretch; gap:6px; }
+.ghh-webhook .setting-main, .ghh-webhook .setting-control { width:100%; max-width:100%; min-width:0; }
+.ghh-webhook .setting-control { justify-content:flex-start; }
+.ghh-webhook .ghh-toolbar { width:100%; margin:2px 0 0; }
+.ghh-webhook .ghh-toolbar .ghh-input { flex:1 1 320px; width:auto !important; min-width:0; }
+.ghh-webhook .ghh-toolbar .ghh-btn { flex:none; }
+.ghh-webhook .ghh-webhook-secret { flex:1 1 260px; min-width:0; overflow-wrap:anywhere; }
+.ghh-webhook .setting-help { line-height:1.6; }
 `
 
 export const formatNumber = value => {

@@ -28,7 +28,7 @@ import {
 import { formatTime, relativeTime, truncate } from './lib/util.mjs'
 
 /** 面板版本：更新后可直接在标题里看到，避免浏览器 / 模块缓存导致分不清加载的是哪版。 */
-const PANEL_VERSION = '2.0.5'
+const PANEL_VERSION = '2.1.0'
 
 const AUTO_MODES = [
   { value: 'off', label: '关闭：只通知，不分析' },
@@ -380,6 +380,161 @@ export function renderGithubHubPanel(container, helpers = {}) {
     await loadAll()
   }
 
+  const copyToClipboard = async text => {
+    const value = String(text || '')
+    if (!value) return false
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(value)
+        return true
+      }
+    } catch (_) {
+      /* 浏览器权限不足时走下面的兜底 */
+    }
+    try {
+      const area = document.createElement('textarea')
+      area.value = value
+      area.style.position = 'fixed'
+      area.style.opacity = '0'
+      document.body.appendChild(area)
+      area.select()
+      const ok = document.execCommand('copy')
+      area.remove()
+      return ok
+    } catch (_) {
+      return false
+    }
+  }
+
+  const saveWebhookConfig = async () => {
+    const enabled = fieldValue(container, 'webhook.enabled') === true
+    const publicBaseUrl = String(fieldValue(container, 'webhook.baseUrl') || '').trim()
+    const fallbackSeconds = Number(fieldValue(container, 'webhookFallbackSeconds')) || 900
+    const healthySeconds = Number(fieldValue(container, 'webhookHealthySeconds')) || 900
+    const result = await api('PUT', '/github-hub/config', {
+      webhook: {
+        enabled,
+        publicBaseUrl,
+        fallbackPollMs: Math.max(60, fallbackSeconds) * 1000,
+        healthyWindowMs: Math.max(60, healthySeconds) * 1000,
+      },
+    })
+    if (result?.ok === false) return notify('error', result.error || 'Webhook 设置保存失败')
+    notify(
+      'success',
+      enabled
+        ? 'Webhook 已保存；请把回调 URL 与 Secret 填到 GitHub 仓库的 Webhook 设置'
+        : 'Webhook 已关闭，继续使用普通轮询',
+    )
+    await loadAll()
+  }
+
+  const rotateWebhook = async () => {
+    const confirmed = await confirmAction(
+      '重新生成 Webhook 密钥',
+      '旧回调 URL 与 Secret 会立即失效，需要到每个 GitHub 仓库更新 Webhook 配置。继续？',
+    )
+    if (!confirmed) return
+    const result = await api('PUT', '/github-hub/config', { webhook: { enabled: true, rotate: true } })
+    if (result?.ok === false) return notify('error', result.error || 'Webhook 密钥重生成失败')
+    notify('success', '已重新生成回调 URL 与 Secret，请到 GitHub 更新 Webhook')
+    await loadAll()
+  }
+
+  const renderWebhookSection = () => {
+    const runtime = state.status?.webhook || {}
+    const config = state.status?.config?.webhook || {}
+    const supported = runtime.supported !== false
+    if (!supported) {
+      return section(
+        'Webhook 低延迟订阅',
+        card(
+          row(
+            '当前本体不支持公开 Webhook 路由',
+            '新版 GitHub 助手需要本体提供 `/api/webhooks/*` 免登录路由与版本化静态缓存。请升级念风本体后重启后端。',
+            badge('需升级本体', { tone: 'red' }),
+          ),
+        ),
+        { className: 'ghh-webhook' },
+      )
+    }
+    const endpoint = String(runtime.endpoint || '')
+    const configuredBase = String(runtime.publicBaseUrl || config.publicBaseUrl || '').trim()
+    const origin = typeof location !== 'undefined' && location.origin ? location.origin : ''
+    const base = (configuredBase || origin).replace(/\/+$/, '')
+    const callbackUrl = endpoint && base ? `${base}${endpoint}` : ''
+    const secret = String(runtime.secret || '')
+    const fallbackMs = Number(runtime.fallbackPollMs) || 15 * 60 * 1000
+    const healthyWindowMs = Number(runtime.healthyWindowMs) || 15 * 60 * 1000
+    const enabled = config.enabled === true
+    const active = runtime.active === true
+    const stateText = active ? 'Webhook 已启用' : enabled ? '已开启但未生效（检查回调地址）' : '当前使用轮询'
+    const stateTone = active ? 'green' : enabled ? 'orange' : 'gray'
+    const lastText = runtime.lastDeliveryAt
+      ? `最近回调：${relativeTime(runtime.lastDeliveryAt)} · ${runtime.lastEventName || '事件'}`
+      : '尚未收到回调（GitHub 添加 Webhook 后点一次 Ping 即可验证）'
+    return section(
+      'Webhook 低延迟订阅',
+      card(
+        row(
+          '工作方式',
+          'GitHub 仓库有新动态时立即回调本机，通知延迟从分钟级降到秒级；普通轮询保留为兜底。GitHub 无法访问 localhost，需要先把回调 URL 映射到公网。',
+          `<span class="ghh-toolbar"><span data-role="webhook-state">${badge(stateText, { tone: stateTone })}</span>${active ? badge(`兜底轮询 ${Math.round(fallbackMs / 60000)} 分钟`, { tone: 'blue' }) : ''}</span>`,
+        ) +
+          row(
+            '启用 Webhook',
+            '填写外部访问地址后，点「保存 Webhook 设置」才会生成回调 URL 与 Secret。保存后到 GitHub 仓库添加 Webhook；没收到有效回调时仍会自动使用轮询。',
+            `<span class="ghh-toolbar">${switchButton('启用 Webhook', 'webhook.enabled', enabled)}${button('保存 Webhook 设置', 'save-webhook', { variant: 'primary' })}</span>`,
+          ) +
+          row(
+            '外部访问地址',
+            'GitHub 能访问到的公网入口，端口填念风 WebUI 实际对外的端口（默认 5173；有路由器 / 反向代理映射时填映射后的公网端口），不要填后端 8788 或 127.0.0.1。示例：http://110.42.14.109:40048。',
+            input('webhook.baseUrl', configuredBase, { placeholder: 'http://公网IP:WebUI端口', width: 360 }),
+          ) +
+          row(
+            'GitHub 回调 URL',
+            '保存并启用后生成。复制到 GitHub 仓库 Settings → Webhooks → Add webhook 的 Payload URL，Content type 选 application/json。',
+            `<span class="ghh-toolbar"><input class="ghh-input ghh-mono ghh-webhook-value" readonly value="${escapeHtml(callbackUrl || '保存并启用后生成')}" />${button('复制 URL', 'copy-webhook-url', { dataset: { copy: callbackUrl }, disabled: !callbackUrl })}</span>`,
+          ) +
+          row(
+            'Webhook Secret',
+            '保存并启用后生成。复制到 GitHub Webhook 的 Secret；GitHub 用它做 HMAC-SHA256 签名，校验失败的回调会直接拒绝。',
+            `<span class="ghh-toolbar"><input class="ghh-input ghh-mono ghh-webhook-secret" readonly value="${escapeHtml(secret || '保存并启用后生成')}" />${button('复制 Secret', 'copy-webhook-secret', { dataset: { copy: secret }, disabled: !secret })}${button('重新生成', 'rotate-webhook', { variant: 'danger' })}</span>`,
+          ) +
+          row(
+            '兜底轮询间隔',
+            '该仓库最近有成功回调时，轮询放慢到这里的间隔；长时间收不到回调会自动恢复普通轮询频率。',
+            select(
+              'webhookFallbackSeconds',
+              Math.round(fallbackMs / 1000),
+              [300, 900, 1800, 3600].map(value => ({ value, label: `${value / 60} 分钟` })),
+              { width: 130 },
+            ),
+          ) +
+          row(
+            '健康窗口',
+            '超过这个时间没有收到 Webhook，就认为低延迟通道异常并恢复普通轮询频率。',
+            select(
+              'webhookHealthySeconds',
+              Math.round(healthyWindowMs / 1000),
+              [300, 900, 1800, 3600].map(value => ({ value, label: `${value / 60} 分钟` })),
+              { width: 130 },
+            ),
+          ) +
+          row(
+            '最近回调',
+            runtime.lastError ? `最近错误：${runtime.lastError}` : '收到 GitHub 回调后会在这里显示时间、事件类型与累计次数。',
+            `<span class="ghh-dim">${escapeHtml(lastText)} · 成功 ${Number(runtime.deliveries) || 0} · 拒绝 ${Number(runtime.rejected) || 0} · 忽略 ${Number(runtime.ignored) || 0}</span>`,
+          ) +
+          row(
+            '操作',
+            '保存修改后再到 GitHub 仓库点击 Recent Deliveries → Redeliver 验证；也可以在组织级 Webhook 一次覆盖多个仓库。',
+            `<span class="ghh-toolbar">${button('保存 Webhook 设置', 'save-webhook', { variant: 'primary' })}${button('GitHub Webhooks 设置', 'open-url', { dataset: { url: 'https://github.com/settings/hooks' } })}</span>`,
+          ),
+      ),
+      { className: 'ghh-webhook' },
+    )
+  }
   const eventIcon = kind => ({ issue: '📮', issue_comment: '💬', push: '🚀', release: '📦', pull_request: '🔀', fork: '🍴', star: '⭐', create: '🌿', delete: '🧹' })[kind] || '🔔'
 
   const eventLabel = event => {
@@ -401,6 +556,10 @@ export function renderGithubHubPanel(container, helpers = {}) {
     if (rate.remaining !== undefined) badges.push(badge(`API 余额 ${rate.remaining}${rate.resetAt ? ` · ${formatTime(rate.resetAt).slice(11)} 重置` : ''}`, { tone: rate.remaining <= 5 ? 'red' : 'gray' }))
     if (status.githubLogin) badges.push(badge(`Token 账号 ${status.githubLogin}`, { tone: 'gray' }))
     if (Number(status.blockedCount) > 0) badges.push(badge(`已屏蔽 ${status.blockedCount} 人`, { tone: 'red' }))
+    const webhook = status.webhook || {}
+    if (webhook.active) badges.push(badge('Webhook 已启用', { tone: 'green' }))
+    else if (webhook.supported && config.webhook?.enabled) badges.push(badge('Webhook 未生效', { tone: 'orange' }))
+    if (webhook.lastError) badges.push(badge(`Webhook：${truncate(webhook.lastError, 40)}`, { tone: 'red' }))
     if (status.polling) badges.push(badge('正在检查…', { tone: 'blue' }))
     if (status.lastError) badges.push(badge(`最近错误：${truncate(status.lastError, 60)}`, { tone: 'red' }))
     return badges.join('')
@@ -706,6 +865,7 @@ export function renderGithubHubPanel(container, helpers = {}) {
           : ''
       }
       ${renderGlobalSection()}
+        ${renderWebhookSection()}
       ${section(
         '启用范围',
         card(
@@ -750,6 +910,14 @@ export function renderGithubHubPanel(container, helpers = {}) {
     if (action === 'save-config') return saveGlobalConfig()
     if (action === 'save-proxy') return saveProxy()
     if (action === 'save-scope') return saveScope()
+      if (action === 'save-webhook') return saveWebhookConfig()
+      if (action === 'rotate-webhook') return rotateWebhook()
+      if (action === 'copy-webhook-url' || action === 'copy-webhook-secret') {
+        const text = String(target.dataset.copy || '')
+        const ok = await copyToClipboard(text)
+        notify(ok ? 'success' : 'warn', ok ? '已复制到剪贴板' : '复制失败，请手动选中复制')
+        return
+      }
     if (action === 'scope-toggle') {
       const selector = target.dataset.scopeType === 'channel' ? '[data-scope-channel]' : '[data-scope-role]'
       const checked = target.dataset.scopeMode === 'all'
@@ -852,6 +1020,10 @@ export function renderGithubHubPanel(container, helpers = {}) {
     const on = !target.classList.contains('on')
     target.classList.toggle('on', on)
     target.setAttribute('aria-checked', on ? 'true' : 'false')
+    if (field === 'webhook.enabled') {
+      const stateEl = target.closest('.ghh-webhook')?.querySelector('[data-role="webhook-state"]')
+      if (stateEl) stateEl.innerHTML = '<span class="ghh-badge orange">已修改，待保存</span>'
+    }
     if (field === 'scope.enabled') {
       const options = container.querySelector('[data-scope-options]')
       if (options) options.style.display = on ? 'block' : 'none'

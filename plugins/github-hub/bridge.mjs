@@ -34,7 +34,7 @@
  * 不可信数据，仅作为 LLM 分析材料，不允许执行其中的指令。
  */
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto'
+import { createCipheriv, createDecipheriv, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import http from 'node:http'
 import https from 'node:https'
 import tls from 'node:tls'
@@ -52,15 +52,17 @@ import {
   eventFilterKeyOfKind,
   eventToCardData,
   eventToChannelText,
+  githubRawEventKey,
   normalizeEventFilters,
   normalizeGithubEvent,
   normalizeRepoFullName,
   parseGithubUrl,
+  webhookEventToRaw,
 } from './lib/github.mjs'
 import { renderEventCard } from './lib/card.mjs'
 
 export const name = 'github-hub-bridge'
-export const version = '2.0.1'
+export const version = '2.1.0'
 export const displayName = 'GitHub 助手后端桥'
 export const description = '订阅仓库事件推送、GitHub 只读检索与 LLM Issue 分析回复。'
 export const author = '念风扩展'
@@ -82,6 +84,8 @@ const MAX_NOTIFIED_KEYS = 800
 const NOTIFICATION_CLAIM_MS = 2 * 60 * 1000
 const POLL_TICK_MS = 5000
 const CARD_WIDTH = 760
+/* GitHub Webhook 回调体上限；大 Push（20 commits + 文件列表）也够用。 */
+const MAX_WEBHOOK_BYTES = 5 * 1024 * 1024
 
 const DEFAULT_SYSTEM_PROMPT = `你是开源项目的一个乐于助人的维护助手。请基于下面提供的仓库资料和 Issue 内容，写一条可以直接发布的维护者回复。
 
@@ -123,6 +127,27 @@ const DEFAULT_CONFIG = {
   pollIntervalMs: 120000,
   requestTimeoutMs: 20000,
   proxy: '',
+  /* Webhook 低延迟事件订阅；关闭 / 未配置时完全走轮询。 */
+  webhook: {
+    enabled: false,
+    /* 路径密钥 + GitHub Webhook Secret 都只在下发时显示一次，落盘加密。 */
+    pathToken: '',
+    secret: '',
+    /* 可选：反代后的对外地址，例如 https://example.com；留空时由设置页按 location.origin 推导。 */
+    publicBaseUrl: '',
+    /* Webhook 正常时的轮询兜底间隔（仍需防漏）；长时间收不到 Webhook 会恢复普通轮询。 */
+    fallbackPollMs: 15 * 60 * 1000,
+    healthyWindowMs: 15 * 60 * 1000,
+    lastDeliveryAt: 0,
+    lastPingAt: 0,
+    lastEventName: '',
+    lastDeliveryId: '',
+    lastError: '',
+    deliveries: 0,
+    rejected: 0,
+    ignored: 0,
+    configuredAt: 0,
+  },
   channels: {
     sendCard: false,
     maxTextChars: 900,
@@ -410,6 +435,7 @@ export function apply(ctx) {
   const httpApi = ctx.httpApi
   const hub = ctx.hub
   const models = ctx.models
+  const publicRouteSupported = typeof httpApi.publicRoute === 'function'
 
   const dataDir = () => settings.dataDir || process.cwd()
   const statePath = () => join(dataDir(), STATE_FILE)
@@ -491,6 +517,40 @@ export function apply(ctx) {
     await chmod(keyPath(), 0o600).catch(() => {})
     return key
   }
+  const newWebhookToken = () => randomBytes(24).toString('base64url')
+
+  const ensureWebhookCredentials = () => {
+    const webhook = isObject(state.config.webhook) ? state.config.webhook : structuredClone(DEFAULT_CONFIG.webhook)
+    state.config.webhook = webhook
+    if (!/^[A-Za-z0-9_-]{16,160}$/.test(String(webhook.pathToken || ''))) webhook.pathToken = newWebhookToken()
+    if (!/^[A-Za-z0-9._-]{16,160}$/.test(String(webhook.secret || ''))) webhook.secret = randomBytes(32).toString('hex')
+    if (!Number(webhook.configuredAt)) webhook.configuredAt = Date.now()
+    return webhook
+  }
+
+  /** 归一化 Webhook 配置；ensure=true 且已启用时补发路径密钥 / Secret。 */
+  const normalizeWebhookConfig = ({ ensure = false } = {}) => {
+    const current = isObject(state.config.webhook) ? state.config.webhook : {}
+    const webhook = { ...structuredClone(DEFAULT_CONFIG.webhook), ...current }
+    webhook.enabled = webhook.enabled === true
+    webhook.publicBaseUrl = String(webhook.publicBaseUrl || '').trim().slice(0, 500)
+    webhook.pathToken = String(webhook.pathToken || '').trim()
+    webhook.secret = String(webhook.secret || '').trim()
+    webhook.fallbackPollMs = clampNumber(webhook.fallbackPollMs, 60 * 1000, 6 * 60 * 60 * 1000, DEFAULT_CONFIG.webhook.fallbackPollMs)
+    webhook.healthyWindowMs = clampNumber(webhook.healthyWindowMs, 60 * 1000, 24 * 60 * 60 * 1000, DEFAULT_CONFIG.webhook.healthyWindowMs)
+    webhook.lastDeliveryAt = Number(webhook.lastDeliveryAt) || 0
+    webhook.lastPingAt = Number(webhook.lastPingAt) || 0
+    webhook.lastEventName = String(webhook.lastEventName || '').slice(0, 80)
+    webhook.lastDeliveryId = String(webhook.lastDeliveryId || '').slice(0, 120)
+    webhook.lastError = String(webhook.lastError || '').slice(0, 500)
+    webhook.deliveries = Number(webhook.deliveries) || 0
+    webhook.rejected = Number(webhook.rejected) || 0
+    webhook.ignored = Number(webhook.ignored) || 0
+    webhook.configuredAt = Number(webhook.configuredAt) || 0
+    state.config.webhook = webhook
+    if (ensure && webhook.enabled) ensureWebhookCredentials()
+    return webhook
+  }
 
   const schedulePersist = () => {
     if (closed || persistTimer) return
@@ -505,9 +565,19 @@ export function apply(ctx) {
       if (!secretKey) secretKey = await ensureSecret()
       await mkdir(dataDir(), { recursive: true })
       state.updatedAt = Date.now()
+      const webhook = isObject(state.config.webhook) ? state.config.webhook : DEFAULT_CONFIG.webhook
       const payload = {
         ...state,
-        config: { ...state.config, githubToken: encrypt(state.config.githubToken) },
+        config: {
+          ...state.config,
+          githubToken: encrypt(state.config.githubToken),
+          // Webhook 路径密钥 / Secret 与 GitHub Token 同样敏感，落盘一并加密。
+          webhook: {
+            ...webhook,
+            pathToken: encrypt(webhook.pathToken || ''),
+            secret: encrypt(webhook.secret || ''),
+          },
+        },
       }
       const tmp = `${statePath()}.${process.pid}.${Date.now().toString(36)}.tmp`
       await writeFile(tmp, JSON.stringify(payload, null, 2), 'utf8')
@@ -529,6 +599,10 @@ export function apply(ctx) {
     if (raw && typeof raw === 'object') {
       state.config = deepMerge(structuredClone(DEFAULT_CONFIG), raw.config || {})
       state.config.githubToken = decrypt(String(raw.config?.githubToken || ''))
+      const rawWebhook = isObject(raw.config?.webhook) ? raw.config.webhook : {}
+      if (!isObject(state.config.webhook)) state.config.webhook = structuredClone(DEFAULT_CONFIG.webhook)
+      state.config.webhook.pathToken = decrypt(String(rawWebhook.pathToken || ''))
+      state.config.webhook.secret = decrypt(String(rawWebhook.secret || ''))
       state.subscriptions = isObject(raw.subscriptions) ? raw.subscriptions : {}
       state.repos = isObject(raw.repos) ? raw.repos : {}
       state.notifications = Array.isArray(raw.notifications) ? raw.notifications.slice(-MAX_NOTIFICATIONS) : []
@@ -569,6 +643,7 @@ export function apply(ctx) {
     state.config.apiBase = trimSlash(state.config.apiBase || DEFAULT_CONFIG.apiBase)
     if (!/^https?:\/\//i.test(state.config.apiBase)) state.config.apiBase = DEFAULT_CONFIG.apiBase
     state.config.autoReply.mode = AUTO_REPLY_MODE.has(state.config.autoReply.mode) ? state.config.autoReply.mode : 'draft'
+    normalizeWebhookConfig({ ensure: true })
     rebuildMonitors()
     ctx.logger.info(
       `[github-hub] 已加载 · 监控 ${state.monitorCount} 个仓库 · Token ${state.config.githubToken ? '已配置' : '未配置'} · 自动回复 ${state.config.autoReply.enabled ? state.config.autoReply.mode : '关闭'}`,
@@ -1266,6 +1341,7 @@ export function apply(ctx) {
         etag: String(current.etag || ''),
         seenIds: Array.isArray(current.seenIds) ? current.seenIds.slice(-MAX_SEEN_IDS) : [],
         lastCheckedAt: Number(current.lastCheckedAt) || 0,
+        lastWebhookAt: Number(current.lastWebhookAt) || 0,
         lastEventAt: Number(current.lastEventAt) || 0,
         nextPollAt: Number(current.nextPollAt) || now + 4000 + index * 1500,
         lastError: String(current.lastError || ''),
@@ -1277,8 +1353,28 @@ export function apply(ctx) {
     state.monitorCount = repos.length
   }
 
-  const effectiveIntervalMs = () => {
+  /**
+   * 轮询间隔。
+   *
+   * Webhook 是低延迟主通道；为了 Webhook 配置错误 / 公网不可达时仍不漏更新，
+   * 只有「该仓库最近确实收到过有效回调」时才把它的轮询放慢到 fallbackPollMs；
+   * 超过 healthyWindowMs 没回调则恢复普通轮询。
+   *
+   * 不按全局 lastDeliveryAt 给所有仓库降频：用户可能只给部分仓库配了 Webhook，
+   * 没配的仓库必须继续按原频率轮询。
+   */
+  const effectiveIntervalMs = (repoState = null) => {
     const base = clampNumber(state.config.pollIntervalMs, 30000, 6 * 60 * 60 * 1000, 120000)
+    const webhook = isObject(state.config.webhook) ? state.config.webhook : {}
+    if (webhook.enabled === true) {
+      const healthyWindow = clampNumber(webhook.healthyWindowMs, 60 * 1000, 24 * 60 * 60 * 1000, DEFAULT_CONFIG.webhook.healthyWindowMs)
+      const lastWebhookAt = repoState ? Number(repoState.lastWebhookAt) || 0 : Number(webhook.lastDeliveryAt) || 0
+      if (lastWebhookAt && Date.now() - lastWebhookAt <= healthyWindow) {
+        const fallback = clampNumber(webhook.fallbackPollMs, 60 * 1000, 6 * 60 * 60 * 1000, DEFAULT_CONFIG.webhook.fallbackPollMs)
+        return Math.max(base, fallback)
+      }
+      return base
+    }
     if (state.config.githubToken) return base
     const count = Math.max(1, monitoredRepos().length)
     return Math.max(base, Math.ceil((3600000 * count) / 45))
@@ -1447,12 +1543,23 @@ export function apply(ctx) {
     const fresh = []
     let staleSkipped = 0
     for (const raw of rawEvents) {
-      const id = String(raw?.id || '')
-      if (!id || seen.has(id)) continue
+      const rawId = String(raw?.id || '')
+      /* Webhook 的 X-GitHub-Delivery 与 Events API 的 Event.id 不同；
+       * 用 payload 内容算跨来源稳定键，避免同一动态先 Webhook 后轮询推两遍。 */
+      const id = String(raw?.dedupeKey || githubRawEventKey(raw) || rawId || '')
+      if (!id || seen.has(id) || (rawId && seen.has(rawId))) continue
+      if (raw?.source === 'webhook' && raw?.force === true) {
+        /* Webhook 可能因网络 / 排队延迟送达，不按“旧事件”丢弃；稳定键已防重。 */
+        seen.add(id)
+        if (rawId && rawId !== id) seen.add(rawId)
+        fresh.push(raw)
+        continue
+      }
       const at = Date.parse(String(raw?.created_at || '')) || 0
       // 早于本次订阅游标的历史事件只记 seen，避免反复回放。
       if (sinceAt && at && at < sinceAt - 5000) {
         seen.add(id)
+        if (rawId && rawId !== id) seen.add(rawId)
         continue
       }
       /* 机器休眠 / 插件重装 / 状态文件丢失 / GitHub PushEvent 延迟时，
@@ -1465,6 +1572,7 @@ export function apply(ctx) {
         continue
       }
       seen.add(id)
+      if (rawId && rawId !== id) seen.add(rawId)
       fresh.push(raw)
     }
     repoState.seenIds = [...seen].slice(-MAX_SEEN_IDS)
@@ -1493,9 +1601,131 @@ export function apply(ctx) {
     }
     return normalized.length
   }
+  /* ---------------- Webhook 低延迟事件订阅 ---------------- */
+
+  /** 常量时间比较，避免路径密钥 / 签名校验被时序侧信道探测。 */
+  const secureStringEqual = (left, right) => {
+    const a = Buffer.from(String(left || ''))
+    const b = Buffer.from(String(right || ''))
+    if (!a.length || a.length !== b.length) return false
+    try {
+      return timingSafeEqual(a, b)
+    } catch (_) {
+      return false
+    }
+  }
+
+  const readRawRequestBody = (req, limit = MAX_WEBHOOK_BYTES) =>
+    new Promise((resolve, reject) => {
+      const chunks = []
+      let size = 0
+      let done = false
+      const cleanup = () => {
+        req.off('data', onData)
+        req.off('end', onEnd)
+        req.off('error', onError)
+        req.off('aborted', onAborted)
+      }
+      const fail = error => {
+        if (done) return
+        done = true
+        cleanup()
+        reject(error)
+      }
+      const onData = chunk => {
+        if (done) return
+        size += chunk.length
+        if (size > limit) {
+          fail(Object.assign(new Error('Webhook 请求体过大'), { status: 413 }))
+          try {
+            req.destroy()
+          } catch (_) {
+            /* ignore */
+          }
+          return
+        }
+        chunks.push(chunk)
+      }
+      const onEnd = () => {
+        if (done) return
+        done = true
+        cleanup()
+        resolve(Buffer.concat(chunks))
+      }
+      const onError = error => fail(error)
+      const onAborted = () => fail(Object.assign(new Error('Webhook 请求已中断'), { status: 400 }))
+      req.on('data', onData)
+      req.on('end', onEnd)
+      req.on('error', onError)
+      req.on('aborted', onAborted)
+    })
+
+  const verifyWebhookSignature = (rawBody, signatureHeader) => {
+    const secret = String(state.config.webhook?.secret || '')
+    if (!secret) return false
+    const signature = String(signatureHeader || '').trim().toLowerCase()
+    if (!signature.startsWith('sha256=')) return false
+    const expected = createHmac('sha256', secret).update(rawBody).digest('hex')
+    return secureStringEqual(signature.slice('sha256='.length), expected)
+  }
+
+  /**
+   * Webhook 回调入口。
+   * 先验路径密钥 + X-Hub-Signature-256，再把 GitHub Webhook payload 转成与
+   * Events API 相同的 raw 结构，复用 processRawEvents 的去重 / 通知 / 自动回复链路。
+   */
+  const ingestWebhookPayload = async ({ eventName = '', deliveryId = '', payload = null } = {}) => {
+    const webhook = normalizeWebhookConfig()
+    const name = String(eventName || '').toLowerCase()
+    webhook.lastEventName = name.slice(0, 80)
+    webhook.lastDeliveryId = String(deliveryId || '').slice(0, 120)
+    webhook.lastError = ''
+    if (name === 'ping') {
+      webhook.lastPingAt = Date.now()
+      webhook.lastDeliveryAt = Date.now()
+      schedulePersist()
+      return { ok: true, event: 'ping', accepted: 0, repo: String(payload?.repository?.full_name || '') }
+    }
+    const repo = normalizeRepoFullName(payload?.repository?.full_name || '')
+    if (!repo) {
+      webhook.ignored += 1
+      webhook.lastError = 'Webhook payload 缺少 repository.full_name'
+      schedulePersist()
+      return { ok: true, event: name, accepted: 0, ignored: true }
+    }
+    if (!monitoredRepos().includes(repo)) {
+      webhook.ignored += 1
+      schedulePersist()
+      return { ok: true, event: name, accepted: 0, ignored: true, repo }
+    }
+    const raw = webhookEventToRaw({ event: name, deliveryId, payload })
+    if (!raw) {
+      webhook.ignored += 1
+      webhook.lastError = `暂不支持 Webhook 事件：${name}`
+      schedulePersist()
+      return { ok: true, event: name, accepted: 0, ignored: true, repo }
+    }
+    raw.source = 'webhook'
+    raw.force = true
+    const repoState = isObject(state.repos[repo])
+      ? state.repos[repo]
+      : (state.repos[repo] = { repo, monitored: true, seenIds: [], sinceAt: 0, lastWebhookAt: 0, lastError: '' })
+    const accepted = await processRawEvents(repoState, [raw], { recoveredFromError: !!repoState.lastError })
+    webhook.lastDeliveryAt = Date.now()
+    repoState.lastWebhookAt = Date.now()
+    webhook.deliveries += 1
+    webhook.lastError = ''
+    schedulePersist()
+    try {
+      hub.broadcast('github-hub:event', { kind: 'webhook', event: name, repo, accepted, at: Date.now() })
+    } catch (_) {
+      /* 广播失败不影响事件处理 */
+    }
+    return { ok: true, event: name, accepted, repo }
+  }
 
   const pollRepo = async repoState => {
-    const interval = effectiveIntervalMs()
+    const interval = effectiveIntervalMs(repoState)
     const hadError = !!repoState.lastError
     repoState.nextPollAt = Date.now() + interval
     try {
@@ -2084,15 +2314,21 @@ export function apply(ctx) {
       }
     })
 
-  const publicConfig = () => ({
-    ...structuredClone(state.config),
-    githubToken: '',
-    hasToken: !!state.config.githubToken,
-    maskedToken: maskSecret(state.config.githubToken),
-  })
+  const publicConfig = () => {
+    const config = structuredClone(state.config)
+    config.githubToken = ''
+    /* 只打码 Secret；路径密钥要回传给已登录的设置页拼回调 URL。 */
+    if (isObject(config.webhook)) config.webhook.secret = maskSecret(config.webhook.secret)
+    return {
+      ...config,
+      hasToken: !!state.config.githubToken,
+      maskedToken: maskSecret(state.config.githubToken),
+    }
+  }
 
   const statusPayload = () => {
     const snapshot = providerSnapshot()
+    const webhook = isObject(state.config.webhook) ? state.config.webhook : {}
     return {
       ok: true,
       hasToken: !!state.config.githubToken,
@@ -2115,6 +2351,28 @@ export function apply(ctx) {
       githubLogin: state.githubLogin,
       blockedUsers: blockedUserList(),
       blockedCount: state.blockedUsers.length,
+      /* Webhook 运行态：设置页据此展示回调地址 / 最近回调 / 签名失败等信息。 */
+      webhook: {
+        supported: publicRouteSupported,
+        enabled: webhook.enabled === true,
+        active: publicRouteSupported && webhook.enabled === true,
+        endpoint: publicRouteSupported && webhook.pathToken ? `/api/webhooks/github-hub/${webhook.pathToken}` : '',
+        publicBaseUrl: String(webhook.publicBaseUrl || ''),
+        hasSecret: !!webhook.secret,
+        // 仅通过已鉴权的 status 接口返回，供设置页复制到 GitHub Webhook 配置。
+        secret: String(webhook.secret || ''),
+        fallbackPollMs: Number(webhook.fallbackPollMs) || DEFAULT_CONFIG.webhook.fallbackPollMs,
+        healthyWindowMs: Number(webhook.healthyWindowMs) || DEFAULT_CONFIG.webhook.healthyWindowMs,
+        lastDeliveryAt: Number(webhook.lastDeliveryAt) || 0,
+        lastPingAt: Number(webhook.lastPingAt) || 0,
+        lastEventName: String(webhook.lastEventName || ''),
+        lastDeliveryId: String(webhook.lastDeliveryId || ''),
+        lastError: String(webhook.lastError || ''),
+        deliveries: Number(webhook.deliveries) || 0,
+        rejected: Number(webhook.rejected) || 0,
+        ignored: Number(webhook.ignored) || 0,
+        configuredAt: Number(webhook.configuredAt) || 0,
+      },
       defaultProvider: snapshot.defaultProvider,
       defaultModel: snapshot.defaultModel,
       providers: snapshot.providers,
@@ -2193,6 +2451,36 @@ export function apply(ctx) {
         if (body.scope.enabled !== undefined) state.config.scope.enabled = body.scope.enabled === true
         if (Array.isArray(body.scope.roleIds)) state.config.scope.roleIds = uniqueList(body.scope.roleIds).slice(0, 300)
         if (Array.isArray(body.scope.channelIds)) state.config.scope.channelIds = uniqueList(body.scope.channelIds).slice(0, 300)
+      }
+      if (isObject(body.webhook)) {
+        const webhook = normalizeWebhookConfig()
+        const patch = body.webhook
+        if (patch.rotate === true) {
+          webhook.pathToken = ''
+          webhook.secret = ''
+          ensureWebhookCredentials()
+        }
+        if (typeof patch.publicBaseUrl === 'string') {
+          const base = patch.publicBaseUrl.trim().replace(/\/+$/, '')
+          if (!base || /^https?:\/\//i.test(base)) webhook.publicBaseUrl = base.slice(0, 500)
+        }
+        if (patch.fallbackPollMs !== undefined) {
+          webhook.fallbackPollMs = clampNumber(patch.fallbackPollMs, 60 * 1000, 6 * 60 * 60 * 1000, webhook.fallbackPollMs)
+        }
+        if (patch.healthyWindowMs !== undefined) {
+          webhook.healthyWindowMs = clampNumber(patch.healthyWindowMs, 60 * 1000, 24 * 60 * 60 * 1000, webhook.healthyWindowMs)
+        }
+        if (patch.enabled !== undefined) webhook.enabled = patch.enabled === true
+        if (webhook.enabled) ensureWebhookCredentials()
+        if (patch.resetStats === true) {
+          webhook.deliveries = 0
+          webhook.rejected = 0
+          webhook.ignored = 0
+          webhook.lastDeliveryAt = 0
+          webhook.lastPingAt = 0
+          webhook.lastError = ''
+        }
+        state.config.webhook = webhook
       }
       if (isObject(body.autoReply)) {
         const patch = body.autoReply
@@ -2588,6 +2876,68 @@ export function apply(ctx) {
       }
       httpApi.sendJson(res, 200, { ok: true, dismissed: !!draft })
     }),
+    ...(publicRouteSupported
+      ? [
+          httpApi.publicRoute('POST', '/api/webhooks/github-hub/:token', async (req, res, params) => {
+            try {
+              await ready
+              const webhook = normalizeWebhookConfig()
+              if (!webhook.enabled) {
+                httpApi.sendJson(res, 202, { ok: false, error: 'Webhook 未启用' })
+                return
+              }
+              if (!webhook.pathToken || !secureStringEqual(String(params.token || ''), webhook.pathToken)) {
+                webhook.rejected += 1
+                webhook.lastError = 'Webhook 路径密钥不正确'
+                schedulePersist()
+                httpApi.sendJson(res, 404, { ok: false })
+                return
+              }
+              const rawBody = await readRawRequestBody(req)
+              if (!verifyWebhookSignature(rawBody, req.headers['x-hub-signature-256'])) {
+                webhook.rejected += 1
+                webhook.lastError = 'Webhook 签名校验失败'
+                schedulePersist()
+                httpApi.sendJson(res, 401, { ok: false })
+                return
+              }
+              let payload = null
+              try {
+                payload = JSON.parse(rawBody.toString('utf8'))
+              } catch (_) {
+                webhook.rejected += 1
+                webhook.lastError = 'Webhook JSON 解析失败'
+                schedulePersist()
+                httpApi.sendJson(res, 400, { ok: false })
+                return
+              }
+              const result = await ingestWebhookPayload({
+                eventName: String(req.headers['x-github-event'] || ''),
+                deliveryId: String(req.headers['x-github-delivery'] || ''),
+                payload,
+              })
+              httpApi.sendJson(res, 202, result)
+            } catch (error) {
+              const status = Number(error?.status) || 500
+              try {
+                state.config.webhook.lastError = String(error?.message || error).slice(0, 500)
+                state.config.webhook.rejected = (Number(state.config.webhook.rejected) || 0) + 1
+                schedulePersist()
+              } catch (_) {
+                /* ignore */
+              }
+              if (!res.headersSent) httpApi.sendJson(res, status, { ok: false, error: String(error?.message || error) })
+              else {
+                try {
+                  res.end()
+                } catch (_) {
+                  /* ignore */
+                }
+              }
+            }
+          }),
+        ]
+      : []),
   ]
 
   ctx.effect(() => () => {

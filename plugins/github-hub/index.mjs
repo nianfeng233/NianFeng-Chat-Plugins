@@ -9,11 +9,11 @@
  *   3. 配置自己的仓库后，新 Issue 到达时由后端桥只读分析仓库内容并生成回复草稿；
  *      可以在对话中让助手调用工具继续获取信息、分析或直接回复 Issue。
  *
- * 前端插件只负责 UI、消息、渠道与工具；所有 GitHub Token、轮询和 LLM 调用都在同目录
+ * 前端插件只负责 UI、消息、渠道与工具；所有 GitHub Token、Webhook 验签、轮询和 LLM 调用都在同目录
  * 的 bridge.mjs 完成后端，Token 不进入前端。
  */
 export const name = 'github-hub'
-export const version = '2.0.5'
+export const version = '2.1.0'
 export const scope = 'both'
 export const displayName = 'GitHub 助手'
 export const description = 'GitHub 仓库订阅推送 · 链接项目卡片预览 · LLM 只读分析并回复 Issue（独立扩展）。'

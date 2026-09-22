@@ -241,6 +241,103 @@ const actorOf = raw =>
     ? { login: String(raw.actor.login || ''), avatarUrl: String(raw.actor.avatar_url || ''), url: String(raw.actor.html_url || '') }
     : { login: '', avatarUrl: '', url: '' }
 
+const compactKey = (value, max = 160) => String(value ?? '').trim().slice(0, max)
+
+/**
+ * 跨来源稳定 event key。
+ *
+ * GitHub Events API 的 Event.id 与 Webhook 的 X-GitHub-Delivery 完全不同，
+ * 同一个 Push / Issue 如果先走 Webhook 再被轮询兜底抓到，不能用来源 id 去重。
+ * 这里根据 payload 中稳定的对象 id（issue.id / comment.id / after / release.id…）
+ * 生成同一个事件键，轮询和 Webhook 两条链路共用，避免同一条动态推送两次。
+ */
+export const githubRawEventKey = raw => {
+  const type = String(raw?.type || '')
+  const payload = isPlainObject(raw?.payload) ? raw.payload : {}
+  const repo = normalizeRepoFullName(raw?.repo?.name || '')
+  if (!repo || !type) return compactKey(raw?.id || '')
+  const action = compactKey(payload.action || '', 40).toLowerCase()
+  const issue = payload.issue || {}
+  const comment = payload.comment || {}
+  const pr = payload.pull_request || {}
+  const release = payload.release || {}
+  const forkee = payload.forkee || {}
+  const sender = payload.sender || payload.actor || raw?.actor || {}
+  switch (type) {
+    case 'IssuesEvent':
+      // issue.number 在 Events API / Webhook 两种 payload 里都稳定存在，优先用它。
+      return `${repo}:issues:${compactKey(issue.number || issue.id || '', 80)}:${action}:${compactKey(issue.updated_at || '', 40)}`
+    case 'IssueCommentEvent':
+      return `${repo}:issue-comment:${compactKey(comment.id || '', 80)}:${action}`
+    case 'PushEvent':
+      return `${repo}:push:${compactKey(payload.after || payload.head_commit?.id || payload.head_commit?.sha || '', 80)}`
+    case 'ReleaseEvent':
+      return `${repo}:release:${compactKey(release.id || release.tag_name || '', 80)}:${action}`
+    case 'PullRequestEvent':
+      return `${repo}:pull-request:${compactKey(pr.number || pr.id || '', 80)}:${action}`
+    case 'CreateEvent':
+    case 'DeleteEvent':
+      return `${repo}:${type === 'CreateEvent' ? 'create' : 'delete'}:${compactKey(payload.ref_type || '', 30)}:${compactKey(payload.ref || '', 160)}`
+    case 'ForkEvent':
+      return `${repo}:fork:${compactKey(forkee.id || forkee.full_name || '', 120)}`
+    case 'WatchEvent':
+    case 'StarEvent':
+      return `${repo}:star:${compactKey(sender.id || sender.login || '', 80)}:${action === 'deleted' || action === 'unstarred' ? 'unstarred' : 'starred'}`
+    default:
+      return compactKey(raw?.id || '')
+  }
+}
+
+const isPlainObject = value => !!value && typeof value === 'object' && !Array.isArray(value)
+
+/**
+ * 把 GitHub Webhook 回调体转成与 Events API 相同的数据结构。
+ * GitHub 事件名与 Events API type 的映射见 WEBHOOK_EVENT_TYPE。
+ */
+export const WEBHOOK_EVENT_TYPE = {
+  issues: 'IssuesEvent',
+  issue_comment: 'IssueCommentEvent',
+  push: 'PushEvent',
+  release: 'ReleaseEvent',
+  pull_request: 'PullRequestEvent',
+  create: 'CreateEvent',
+  delete: 'DeleteEvent',
+  fork: 'ForkEvent',
+  watch: 'WatchEvent',
+  star: 'StarEvent',
+}
+
+export const webhookEventToRaw = ({ event = '', deliveryId = '', payload = null } = {}) => {
+  const type = WEBHOOK_EVENT_TYPE[String(event || '').toLowerCase()] || ''
+  if (!type || !isPlainObject(payload)) return null
+  const repository = isPlainObject(payload.repository) ? payload.repository : {}
+  const repo = normalizeRepoFullName(repository.full_name || '')
+  if (!repo) return null
+  const updatedAt =
+    payload.issue?.updated_at ||
+    payload.comment?.updated_at ||
+    payload.pull_request?.updated_at ||
+    payload.release?.published_at ||
+    payload.release?.created_at ||
+    payload.head_commit?.timestamp ||
+    payload.repository?.updated_at ||
+    ''
+  const createdAt = updatedAt || new Date().toISOString()
+  return {
+    id: compactKey(deliveryId || '', 120),
+    type,
+    created_at: createdAt,
+    actor: isPlainObject(payload.sender)
+      ? { login: payload.sender.login, avatar_url: payload.sender.avatar_url, html_url: payload.sender.html_url }
+      : undefined,
+    repo: {
+      name: repo,
+      url: String(repository.url || repository.html_url || `https://api.github.com/repos/${repo}`),
+    },
+    payload,
+  }
+}
+
 /**
  * 把 GitHub Events API 的原始事件转成结构化事件。
  * 不支持的 event type 返回 null（轮询时仍然会记入 seen，避免重复处理）。
@@ -251,7 +348,10 @@ export const normalizeGithubEvent = raw => {
   const repo = String(raw?.repo?.name || '')
   const repoUrl = String(raw?.repo?.url || '').replace('api.github.com/repos', 'github.com')
   const base = {
-    id: String(raw?.id || ''),
+    // id 使用跨来源稳定键；apiId 仅保留来源 id 方便排查。
+    id: String(raw?.dedupeKey || githubRawEventKey(raw) || raw?.id || ''),
+    apiId: String(raw?.id || ''),
+    source: String(raw?.source || 'events'),
     type,
     repo,
     repoUrl,
@@ -414,7 +514,17 @@ export const normalizeGithubEvent = raw => {
         url: String(payload.forkee?.html_url || repoUrl),
       }
     case 'WatchEvent':
-      return { ...base, kind: 'star', action: 'started', actionText: '收到新的 Star', url: repoUrl }
+    case 'StarEvent': {
+      const rawAction = String(payload.action || '').toLowerCase()
+      const unstarred = rawAction === 'deleted' || rawAction === 'unstarred'
+      return {
+        ...base,
+        kind: 'star',
+        action: unstarred ? 'unstarred' : 'started',
+        actionText: unstarred ? '取消了 Star' : '收到新的 Star',
+        url: repoUrl,
+      }
+    }
     default:
       return null
   }
