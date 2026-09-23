@@ -11,7 +11,8 @@ import { BUILTIN_SOURCES, listAllSources, sourceUrlCandidates, buildCustomSource
 import { parseStatusPageSummary, statusPageHistoryFeedUrl, statusPageSummaryUrl, componentStatusLabel, incidentStatusLabel } from './lib/statuspage.mjs'
 import { parseFeed, looksLikeFeed } from './lib/feed.mjs'
 import { parseGoogleCloudIncidents, googleCloudProducts } from './lib/google-cloud.mjs'
-import { collectStatusPageEvents, collectFeedEvents, collectGoogleCloudEvents, eventMatchesSubscription, formatEventText } from './lib/detect.mjs'
+import { collectStatusPageEvents, collectFeedEvents, collectGoogleCloudEvents, eventMatchesSubscription, formatEventText, formatEventDigestText } from './lib/detect.mjs'
+import { classifyStatusText, extractAffectedComponents, localizeStatusTitle, summarizeStatusBody } from './lib/text.mjs'
 
 let passed = 0
 let failed = 0
@@ -141,6 +142,7 @@ const withIncident = parseStatusPageSummary(
 )
 const second = collectStatusPageEvents({ source: { id: 'deepseek', name: 'DeepSeek' }, parsed: withIncident, previous: first.snapshot })
 check('incident 更新会产生一条事件', second.events.length === 1 && second.events[0].kind === 'incident')
+check('首次异常标记为重要通知', second.events[0].important === true)
 check('incident 正文包含最新进展', second.events[0].body.includes('排查'))
 check('同一次故障的组件变化被抑制，不刷两条', second.events.filter(item => item.kind === 'component').length === 0)
 
@@ -164,7 +166,8 @@ const third = collectStatusPageEvents({
   ),
   previous: second.snapshot,
 })
-check('同一 incident 再次更新仍会推送', third.events.length === 1 && third.events[0].statusLabel === '观察中')
+check('同一 incident 的过程更新仍记录在最近事件', third.events.length === 1 && third.events[0].statusLabel === '观察中')
+check('过程更新默认不推送（important=false）', third.events[0].important === false)
 
 const resolved = incident({
   status: 'resolved',
@@ -187,6 +190,7 @@ const fourth = collectStatusPageEvents({
   previous: third.snapshot,
 })
 check('incident 恢复会推送 recovery', fourth.events.length === 1 && fourth.events[0].kind === 'recovery')
+check('恢复通知标记为重要通知', fourth.events[0].important === true)
 check('恢复事件的组件变化同样被抑制', fourth.events.filter(item => item.kind === 'component').length === 0)
 
 const componentOnly = collectStatusPageEvents({
@@ -204,6 +208,25 @@ const componentOnly = collectStatusPageEvents({
 })
 check('没有 incident 时组件状态变化会推送', componentOnly.events.length === 1 && componentOnly.events[0].kind === 'component')
 check('组件变化事件带旧 / 新状态', componentOnly.events[0].oldStatus === 'operational' && componentOnly.events[0].newStatus === 'degraded_performance')
+check('首次质量下降标记为重要通知', componentOnly.events[0].important === true)
+const componentRecovered = collectStatusPageEvents({
+  source: { id: 'deepseek', name: 'DeepSeek' },
+  parsed: parseStatusPageSummary(
+    statusSummary({
+      components: [
+        { id: 'api', name: 'API', status: 'operational', updated_at: '2026-09-20T09:30:00Z' },
+        { id: 'chat', name: 'Chat', status: 'operational', updated_at: '2026-09-20T09:30:00Z' },
+      ],
+    }),
+    { id: 'deepseek', name: 'DeepSeek' },
+  ),
+  previous: componentOnly.snapshot,
+})
+check('组件恢复会推送 recovery 事件', componentRecovered.events.length === 1 && componentRecovered.events[0].newStatus === 'operational')
+check('组件恢复仅在推送过异常后通知', componentRecovered.events[0].important === true)
+const digestText = formatEventDigestText([componentOnly.events[0], { ...componentOnly.events[0], id: 'chat-2', title: 'Chat', componentId: 'chat2', componentName: 'Chat 2' }])
+check('多条组件变化会合并为一条摘要', digestText.includes('共 2 个组件状态变化') && digestText.includes('Chat：') && digestText.includes('Chat 2'))
+
 
 /* ------------------------------------------------------------------ */
 section('4. RSS / Atom 解析与检测')
@@ -233,15 +256,52 @@ const rssNext = parseFeed(
   { id: 'rss-example', name: 'Example' },
 )
 const feedSecond = collectFeedEvents({ source: { id: 'rss-example', name: 'Example' }, feed: rssNext, previous: feedFirst.snapshot })
-check('RSS 新增条目会产生事件', feedSecond.events.length === 1 && feedSecond.events[0].kind === 'feed')
-check('RSS 事件正文 / 链接正常', feedSecond.events[0].body.includes('resolved') && feedSecond.events[0].url.includes('/incidents/2'))
+check('RSS 新增恢复条目会识别为 recovery', feedSecond.events.length === 1 && feedSecond.events[0].kind === 'recovery')
+check('未先看到异常的恢复不推送（important=false）', feedSecond.events[0].important === false && feedSecond.events[0].url.includes('/incidents/2'))
 
 const rssUpdated = {
   ...rssNext,
   items: rssNext.items.map(item => (item.id === 'incident-1' ? { ...item, body: 'We are now seeing severe latency.' } : item)),
 }
 const feedThird = collectFeedEvents({ source: { id: 'rss-example', name: 'Example' }, feed: rssUpdated, previous: feedSecond.snapshot })
-check('同一 guid 内容更新也会产生事件', feedThird.events.length === 1 && feedThird.events[0].body.includes('severe latency'))
+check('同一 guid 内容更新仍会记录事件', feedThird.events.length === 1 && feedThird.events[0].kind === 'incident')
+check('基线中的过程更新不推送（important=false）', feedThird.events[0].important === false)
+
+/* 真实 OpenAI history.rss 的典型形态：标题是事件名，正文带
+ * “Status: Investigating / Monitoring / Resolved”和 affected components 列表。 */
+const openaiSource = { id: 'openai-rss', name: 'GPT（OpenAI）', emoji: '🤖' }
+const openaiFeedText = items => `<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>OpenAI Status</title><link>https://status.openai.com</link>${items}</channel></rss>`
+const openaiItem = body => `<item><title>Elevated Error Rates</title><link>https://status.openai.com/incidents/01KYC</link><guid>01KYC</guid><pubDate>Wed, 23 Sep 2026 11:00:00 GMT</pubDate><description><![CDATA[${body}]]></description></item>`
+const openaiSeed = collectFeedEvents({ source: openaiSource, feed: parseFeed(openaiFeedText(''), openaiSource), previous: null })
+check('OpenAI 式 RSS 首次只建立空基线', openaiSeed.seed === true && Object.keys(openaiSeed.snapshot.incidents).length === 0)
+const openaiActive = collectFeedEvents({
+  source: openaiSource,
+  feed: parseFeed(openaiFeedText(openaiItem('<p>Status: Investigating</p><p>We are investigating elevated error rates. Affected components Conversations (Operational), Images (Degraded Performance), Files (Operational)</p>')), openaiSource),
+  previous: openaiSeed.snapshot,
+})
+check('OpenAI 式 RSS 首次异常会推送', openaiActive.events.length === 1 && openaiActive.events[0].kind === 'incident' && openaiActive.events[0].important === true)
+check('OpenAI 英文标题会中文化', openaiActive.events[0].title === '错误率升高' && openaiActive.events[0].statusLabel === '调查中')
+check('OpenAI 组件列表会从英文正文提取', openaiActive.events[0].components.length === 3 && openaiActive.events[0].components[0].name === 'Conversations')
+check('OpenAI 英文过程正文不会原样刷屏', !openaiActive.events[0].body.includes('Status:') && !openaiActive.events[0].body.includes('Affected components'))
+const openaiMonitoring = collectFeedEvents({
+  source: openaiSource,
+  feed: parseFeed(openaiFeedText(openaiItem('<p>Status: Monitoring</p><p>We are monitoring the fix.</p>')), openaiSource),
+  previous: openaiActive.snapshot,
+})
+check('OpenAI 过程更新 important=false', openaiMonitoring.events.length === 1 && openaiMonitoring.events[0].important === false)
+const openaiResolved = collectFeedEvents({
+  source: openaiSource,
+  feed: parseFeed(openaiFeedText(openaiItem('<p>Status: Resolved</p><p>All impacted services have now fully recovered. Affected components Conversations (Operational), Images (Operational), Files (Operational)</p>')), openaiSource),
+  previous: openaiMonitoring.snapshot,
+})
+check('OpenAI 恢复会推送 recovery', openaiResolved.events.length === 1 && openaiResolved.events[0].kind === 'recovery' && openaiResolved.events[0].important === true)
+check('OpenAI 恢复正文中文化且不刷英文列表', openaiResolved.events[0].body === '受影响服务已全部恢复。' && !formatEventText(openaiResolved.events[0]).includes('Operational'))
+
+const legacyRssSnapshot = clone(feedFirst.snapshot)
+delete legacyRssSnapshot.incidents
+const legacyFeed = collectFeedEvents({ source: { id: 'rss-example', name: 'Example' }, feed: rss, previous: legacyRssSnapshot })
+check('旧版 RSS 快照升级后静默重建状态', legacyFeed.seed === true && legacyFeed.events.length === 0 && !!legacyFeed.snapshot.incidents)
 
 /* ------------------------------------------------------------------ */
 section('5. Google Cloud 解析与检测')
@@ -286,7 +346,36 @@ const googleSecond = collectGoogleCloudEvents({
   parsed: parseGoogleCloudIncidents(googleNextRaw, { id: 'gemini', name: 'Gemini', keywords: ['gemini'] }),
   previous: googleFirst.snapshot,
 })
-check('Google Cloud 事件更新会推送', googleSecond.events.length === 1 && googleSecond.events[0].body.includes('Mitigation'))
+check('Google Cloud 过程更新仍记录在最近事件', googleSecond.events.length === 1 && googleSecond.events[0].kind === 'incident')
+check('基线中已存在的 Google 事件不会被当成新异常推送', googleSecond.events[0].important === false)
+
+const googleSource = { id: 'gemini', name: 'Gemini', keywords: ['gemini'] }
+const googleNewRaw = clone(googleNextRaw)
+googleNewRaw.push({
+  id: 'g-3',
+  begin: '2026-09-20T10:00:00Z',
+  end: null,
+  status_impact: 'SERVICE_OUTAGE',
+  external_desc: 'Gemini API is down.',
+  affected_products: [{ title: 'Gemini API', id: 'generativelanguage.googleapis.com' }],
+  updates: [{ created: '2026-09-20T10:01:00Z', status: 'SERVICE_OUTAGE', text: 'Gemini API is unavailable.' }],
+})
+const googleThird = collectGoogleCloudEvents({
+  source: googleSource,
+  parsed: parseGoogleCloudIncidents(googleNewRaw, googleSource),
+  previous: googleSecond.snapshot,
+})
+check('Google Cloud 新增异常会推送', googleThird.events.length === 1 && googleThird.events[0].important === true && googleThird.events[0].kind === 'incident')
+const googleResolvedRaw = clone(googleNewRaw)
+const g3 = googleResolvedRaw.find(item => item.id === 'g-3')
+g3.end = '2026-09-20T10:30:00Z'
+g3.status_impact = 'SERVICE_AVAILABLE'
+const googleFourth = collectGoogleCloudEvents({
+  source: googleSource,
+  parsed: parseGoogleCloudIncidents(googleResolvedRaw, googleSource),
+  previous: googleThird.snapshot,
+})
+check('Google Cloud 恢复会推送 recovery', googleFourth.events.length === 1 && googleFourth.events[0].kind === 'recovery' && googleFourth.events[0].important === true)
 
 /* ------------------------------------------------------------------ */
 section('6. 订阅过滤与文案')
@@ -305,6 +394,24 @@ const text = formatEventText(incidentEvent, { maxTextChars: 1200, timeZone: 'Asi
 check('通知正文包含来源与事件标题', text.includes('DeepSeek') && text.includes('API 错误率升高'))
 check('通知正文包含状态和详情链接', text.includes('状态：') && text.includes('https://status.deepseek.com/incidents/inc-1'))
 check('通知正文受最大长度约束', formatEventText(incidentEvent, { maxTextChars: 200 }).length <= 200)
+
+const openaiRecovery = classifyStatusText({
+  title: 'Elevated Error Rates',
+  body: 'Status: Resolved\nAll impacted services have now fully recovered. Affected components Conversations (Operational), Images (Operational)',
+})
+check('英文 OpenAI 恢复动态能识别为 recovery', openaiRecovery.phase === 'recovery' && openaiRecovery.label === '已恢复')
+const openaiComponents = extractAffectedComponents('Affected components Conversations (Operational), Images (Operational)')
+check('英文 affected components 能提取组件名', openaiComponents.join('、') === 'Conversations、Images')
+check('常见英文事件标题会中文化', localizeStatusTitle('Elevated Error Rates') === '错误率升高')
+const englishSummary = summarizeStatusBody('Status: Resolved. All impacted services have now fully recovered. Affected components Conversations (Operational).')
+check('英文恢复正文会压成中文短句', englishSummary.includes('已全部恢复') && !englishSummary.includes('Operational'))
+const incidentDigest = formatEventDigestText([
+  { ...second.events[0], id: 'd1', title: '错误率升高', statusLabel: '调查中', statusEmoji: '🔴', url: '' },
+  { ...second.events[0], id: 'd2', title: 'API 延迟升高', statusLabel: '服务受阻', statusEmoji: '🟠', url: '' },
+])
+check('多条异常会合并为一条摘要', incidentDigest.includes('共 2 项服务异常') && incidentDigest.includes('错误率升高') && incidentDigest.includes('API 延迟升高'))
+check('摘要受最大长度约束', formatEventDigestText([second.events[0], third.events[0]], { maxTextChars: 200 }).length <= 200)
+
 
 console.log(`\n结果：${passed}/${passed + failed} 项通过`)
 if (failed) process.exit(1)

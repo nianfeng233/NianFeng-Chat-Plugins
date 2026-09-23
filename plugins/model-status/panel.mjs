@@ -32,7 +32,7 @@ import {
   switchButton,
 } from './ui.mjs'
 
-export const PANEL_VERSION = '2.1.1'
+export const PANEL_VERSION = '2.2.0'
 
 const CATEGORY_ORDER = ['llm', 'coding', 'image', 'audio', 'infra', 'custom']
 
@@ -194,6 +194,7 @@ export function renderModelStatusPanel(container, helpers = {}) {
       requestTimeoutMs: Math.round(Math.max(3, timeoutSeconds || 20) * 1000),
       proxy: String(fieldValue(container, 'ms-proxy') || '').trim(),
       timeZone: String(fieldValue(container, 'ms-timezone') || '').trim() || 'Asia/Shanghai',
+      notifyMode: String(fieldValue(container, 'ms-notify-mode') || 'important') === 'all' ? 'all' : 'important',
       maxEventAgeMs: Math.round(Math.max(1, maxAgeHours || 24) * 60 * 60 * 1000),
       maxPendingAgeMs: Math.round(Math.max(1, pendingMinutes || 30) * 60 * 1000),
       maxTextChars: Math.round(Math.max(200, Math.min(4000, maxChars || 1200))),
@@ -321,7 +322,7 @@ export function renderModelStatusPanel(container, helpers = {}) {
     return `<div class="ms-head">
       <div>
         <div class="ms-title">${MODEL_STATUS_ICON} 模型状态订阅</div>
-        <div class="ms-desc">为每个渠道订阅厂商状态页；模型 API / 网页服务出现故障、恢复或组件状态变化时推送到群。首次检查只建立基线，不会补发历史故障。</div>
+        <div class="ms-desc">为每个渠道订阅厂商状态页；默认只推送服务异常、质量下降与恢复，自动过滤调查中 / 观察中等过程动态和多条同时变化的刷屏。首次检查只建立基线，不会补发历史故障。</div>
         <div class="ms-status">
           ${badge(state.bridgeMissing ? '后端桥未加载' : '后端桥已连接', { tone: state.bridgeMissing ? 'red' : 'green' })}
           ${badge(`后端 v${escapeHtml(state.status?.version || '?')}`, { tone: 'gray' })}
@@ -345,6 +346,10 @@ export function renderModelStatusPanel(container, helpers = {}) {
       row('请求超时', '单次访问状态页的最长等待时间（秒）。', input('ms-timeout-seconds', Math.round((Number(config.requestTimeoutMs) || 20000) / 1000), { type: 'number', min: 3, max: 120, width: 110 })),
       row('HTTP 代理', '留空跟随「设置 → 网络」的全局代理；OpenAI 等站点无法直连时可在这里单独指定。', input('ms-proxy', config.proxy || '', { placeholder: 'http://127.0.0.1:7890', width: 260 })),
       row('时区', '事件时间与消息里的时间戳使用此时区显示。', input('ms-timezone', config.timeZone || 'Asia/Shanghai', { placeholder: 'Asia/Shanghai', width: 180 })),
+      row('通知模式', '默认只推送服务异常、质量下降与恢复；选择「全部状态更新」会包含调查中 / 观察中等过程动态，消息会明显变多。', select('ms-notify-mode', config.notifyMode || 'important', [
+        { value: 'important', label: '仅异常与恢复（推荐）' },
+        { value: 'all', label: '全部状态更新' },
+      ], { width: 220 })),
       row('旧事件补发上限', '休眠 / 重启 / 后端离线期间产生的、早于该时长的状态变化只记录不推送（小时）。', input('ms-max-age-hours', Math.round((Number(config.maxEventAgeMs) || 86400000) / 3600000), { type: 'number', min: 1, max: 720, width: 110 })),
       row('通知过期时间', '通知生成后超过该时长仍无人投递就自动作废，避免睡醒后刷屏（分钟）。', input('ms-pending-minutes', Math.round((Number(config.maxPendingAgeMs) || 1800000) / 60000), { type: 'number', min: 1, max: 10080, width: 110 })),
       row('消息最大长度', '单条状态推送最多保留多少字符，防止超长故障说明被渠道截断。', input('ms-max-chars', Number(config.maxTextChars) || 1200, { type: 'number', min: 200, max: 4000, width: 110 })),
@@ -484,9 +489,9 @@ export function renderModelStatusPanel(container, helpers = {}) {
     const expandedKey = `${channelId}:${sourceId}`
     const events = item.events || {}
     const eventChecks = [
-      ['incident', '故障与恢复'],
+      ['incident', '异常与恢复'],
       ['maintenance', '计划维护'],
-      ['component', '组件状态'],
+      ['component', '组件状态变化'],
     ]
       .map(([key, label]) => `<label class="ms-evt"><input type="checkbox" data-action="toggle-event" data-channel-id="${escapeHtml(channelId)}" data-source-id="${escapeHtml(sourceId)}" data-event-key="${escapeHtml(key)}"${events[key] !== false ? ' checked' : ''} />${escapeHtml(label)}</label>`)
       .join('')
@@ -558,9 +563,13 @@ export function renderModelStatusPanel(container, helpers = {}) {
         const title = event.title || eventKindLabel(event.kind) || '状态更新'
         const sourceName = event.sourceName || event.sourceId || ''
         const summary = truncateText(event.body || event.statusLabel || '', 180)
+        const badges = [
+          event.suppressed ? badge('未推送', { tone: 'orange' }) : '',
+          event.important === false ? badge('过程动态', { tone: 'gray' }) : '',
+        ].filter(Boolean).join(' ')
         return `<div class="ms-list-item">
           <div class="ms-list-main">
-            <div class="ms-list-title">${escapeHtml(event.statusEmoji || '📡')} ${escapeHtml(title)}${event.suppressed ? ` ${badge('未推送', { tone: 'orange' })}` : ''}</div>
+            <div class="ms-list-title">${escapeHtml(event.statusEmoji || '📡')} ${escapeHtml(title)}${badges ? ` ${badges}` : ''}</div>
             <div class="ms-list-summary">${escapeHtml(sourceName)}${summary ? ` · ${escapeHtml(summary)}` : ''}</div>
           </div>
           <div style="text-align:right">
@@ -570,7 +579,7 @@ export function renderModelStatusPanel(container, helpers = {}) {
         </div>`
       })
       .join('')
-    return card('最近事件', '这里记录插件捕获到的状态变化；标记「未推送」表示超过补发时限或建立基线时忽略。', items)
+    return card('最近事件', '这里记录插件捕获到的状态变化；「未推送」表示超过补发时限或建立基线时忽略，「过程动态」表示默认只记录、不发送渠道通知。', items)
   }
 
   const renderBody = () => `

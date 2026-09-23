@@ -61,11 +61,12 @@ import {
   collectStatusPageEvents,
   compactEvent,
   eventMatchesSubscription,
+  formatEventDigestText,
   formatEventText,
 } from './lib/detect.mjs'
 
 export const name = 'model-status-bridge'
-export const version = '2.1.1'
+export const version = '2.2.0'
 export const displayName = '模型状态订阅后端桥'
 export const description = '轮询各厂商状态页 / RSS，检测模型服务状态变化并生成渠道通知。'
 export const author = '念风扩展'
@@ -89,6 +90,8 @@ const DEFAULT_CONFIG = {
   requestTimeoutMs: 20000,
   proxy: '',
   timeZone: 'Asia/Shanghai',
+  /* important：只推送服务异常 / 质量下降 / 恢复等重要节点；all：保留全部动态。 */
+  notifyMode: 'important',
   /* 事件发生到这个时间之前只记入最近事件，不再推送。默认 24 小时。 */
   maxEventAgeMs: 24 * 60 * 60 * 1000,
   /* 通知生成后超过这个时间仍未投递则作废，避免睡醒后一次性刷屏。 */
@@ -129,6 +132,9 @@ function sanitizeConfigPatch(patch, current = {}) {
   setNumber('maxPendingAgeMs', 60 * 1000, 7 * 24 * 60 * 60 * 1000)
   setNumber('maxTextChars', 200, 4000)
   if (patch.proxy !== undefined) next.proxy = String(patch.proxy || '').trim().slice(0, 500)
+  if (patch.notifyMode !== undefined) {
+    next.notifyMode = String(patch.notifyMode || '').trim() === 'all' ? 'all' : 'important'
+  }
   if (patch.timeZone !== undefined) {
     const value = String(patch.timeZone || '').trim().slice(0, 64) || 'Asia/Shanghai'
     try {
@@ -889,37 +895,73 @@ export function apply(ctx) {
     }
   }
 
-  const notifySubscribers = (event, source) => {
+  const notificationGroupOf = event => {
+    const kind = String(event?.kind || 'incident')
+    if (kind === 'recovery' || kind === 'maintenance' || kind === 'component' || kind === 'feed') return kind
+    return 'incident'
+  }
+
+  const notifyModeAllows = event => {
+    if (state.config?.notifyMode === 'all') return true
+    return event?.important === true
+  }
+
+  const notifySubscribers = (input, source) => {
+    const events = (Array.isArray(input) ? input : [input]).filter(Boolean)
     const created = []
+    if (!events.length) return created
+
     for (const subscription of Object.values(state.subscriptions)) {
       if (!subscription || subscription.enabled === false) continue
-      const item = subscription.sources?.[event.sourceId]
-      if (!item || item.enabled === false) continue
-      if (!eventMatchesSubscription(event, item)) continue
       if (!sharedPluginScopeAllows({ channelId: subscription.channelId, roleId: subscription.roleId })) continue
-      const key = `${subscription.channelId}:${event.id}`
-      if (alreadyNotified(key)) continue
-      const text = formatEventText(event, state.config)
-      const notification = makeNotification({
-        channel: {
-          channelId: subscription.channelId,
-          roleId: subscription.roleId,
-          name: subscription.name,
-          type: subscription.type,
-        },
-        event,
-        text,
-        kind: event.kind,
-      })
-      if (!notification) continue
-      created.push(notification)
-      rememberNotified(key)
+
+      const groups = new Map()
+      for (const event of events) {
+        const item = subscription.sources?.[event.sourceId]
+        if (!item || item.enabled === false) continue
+        if (!eventMatchesSubscription(event, item)) continue
+        if (!notifyModeAllows(event)) continue
+        const key = `${subscription.channelId}:${event.id}`
+        if (alreadyNotified(key)) continue
+        const groupKey = `${event.sourceId}:${notificationGroupOf(event)}`
+        if (!groups.has(groupKey)) groups.set(groupKey, [])
+        groups.get(groupKey).push(event)
+      }
+
+      for (const group of groups.values()) {
+        group.sort((a, b) => (Number(a.at) || 0) - (Number(b.at) || 0))
+        const first = group[0]
+        const text = group.length === 1 ? formatEventText(first, state.config) : formatEventDigestText(group, state.config)
+        const kind = notificationGroupOf(first)
+        const notification = makeNotification({
+          channel: {
+            channelId: subscription.channelId,
+            roleId: subscription.roleId,
+            name: subscription.name,
+            type: subscription.type,
+          },
+          event: group.length === 1 ? first : { ...first, batchCount: group.length, batchIds: group.map(item => item.id).slice(0, 20) },
+          text,
+          kind,
+        })
+        if (!notification) continue
+        if (group.length > 1) {
+          notification.batch = {
+            count: group.length,
+            kind,
+            ids: group.map(item => item.id).slice(0, 20),
+          }
+        }
+        created.push(notification)
+        for (const event of group) rememberNotified(`${subscription.channelId}:${event.id}`)
+      }
     }
+
     if (created.length) {
       trimNotifications()
       schedulePersist()
       broadcastNotifications(created)
-      ctx.logger.info(`[model-status] ${source?.name || event.sourceName || event.sourceId} 事件已生成 ${created.length} 条渠道通知`)
+      ctx.logger.info(`[model-status] ${source?.name || events[0].sourceName || events[0].sourceId} 事件已生成 ${created.length} 条渠道通知`)
     }
     return created
   }
@@ -1095,7 +1137,7 @@ export function apply(ctx) {
       }
       state.events = state.events.slice(0, MAX_EVENTS)
       eventCount = fresh.length
-      for (const event of fresh) notificationCount += notifySubscribers(event, source).length
+      if (fresh.length) notificationCount += notifySubscribers(fresh, source).length
       if (fresh.length) {
         try {
           hub.broadcast('model-status:event', { kind: 'events', events: fresh.map(compactEvent), at: Date.now() })
