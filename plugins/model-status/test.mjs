@@ -13,6 +13,7 @@ import { parseFeed, looksLikeFeed } from './lib/feed.mjs'
 import { parseGoogleCloudIncidents, googleCloudProducts } from './lib/google-cloud.mjs'
 import { collectStatusPageEvents, collectFeedEvents, collectGoogleCloudEvents, eventMatchesSubscription, formatEventText, formatEventDigestText } from './lib/detect.mjs'
 import { classifyStatusText, extractAffectedComponents, localizeStatusTitle, summarizeStatusBody } from './lib/text.mjs'
+import { readFileSync } from 'node:fs'
 
 let passed = 0
 let failed = 0
@@ -91,6 +92,19 @@ check('包含用户点名的 5 家', ['deepseek', 'anthropic', 'openai', 'gemini
 check('所有内置 url 都是合法 http(s)', BUILTIN_SOURCES.every(item => isValidHttpUrl(item.url)))
 check('所有内置 adapter 合法', BUILTIN_SOURCES.every(item => ['auto', 'statuspage', 'rss', 'google-cloud'].includes(item.adapter)))
 check('Gemini 默认带 gemini 关键词', (BUILTIN_SOURCES.find(item => item.id === 'gemini')?.keywords || []).includes('gemini'))
+const manifestVersion = JSON.parse(readFileSync(new URL('./manifest.json', import.meta.url), 'utf8')).version
+const versionOf = (file, name) => {
+  const match = readFileSync(new URL(file, import.meta.url), 'utf8').match(new RegExp(`export const ${name} = '([^']+)'`))
+  return match ? match[1] : ''
+}
+check(
+  '清单 / 前端 / 后端 / 面板版本号一致',
+  versionOf('./index.mjs', 'version') === manifestVersion &&
+    versionOf('./bridge.mjs', 'version') === manifestVersion &&
+    versionOf('./panel.mjs', 'PANEL_VERSION') === manifestVersion,
+  `manifest=${manifestVersion} index=${versionOf('./index.mjs', 'version')} bridge=${versionOf('./bridge.mjs', 'version')} panel=${versionOf('./panel.mjs', 'PANEL_VERSION')}`,
+)
+
 check('Statuspage 目录能派生 summary.json', statusPageSummaryUrl('https://status.deepseek.com') === 'https://status.deepseek.com/api/v2/summary.json')
 check('Statuspage summary 地址也能派生 history.rss', statusPageHistoryFeedUrl('https://status.deepseek.com/api/v2/summary.json') === 'https://status.deepseek.com/history.rss')
 check('auto 候选派生 summary + rss', sourceUrlCandidates({ url: 'https://status.deepseek.com' }).includes('https://status.deepseek.com/api/v2/summary.json'))

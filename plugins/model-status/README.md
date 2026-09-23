@@ -210,7 +210,7 @@ extensions/model-status/
 
 ```powershell
 node extensions/model-status/test.mjs
-# 结果：72/72 项通过
+# 结果：73/73 项通过
 ```
 
 自测不联网，覆盖来源目录、Statuspage / RSS / Atom / Google Cloud 解析、基线建立、事件去重、
@@ -225,7 +225,8 @@ node extensions/model-status/test.mjs
 - 针对 OpenAI 等英文 RSS：识别 `Status: Investigating / Identified / Monitoring / Resolved`，
   中文化常见事件标题，提取 affected components 列表；无法可靠翻译的英文正文不再原文转发；
 - 修复 v2.1.x 旧快照升级后旧故障可能被当成新动态补发的问题：升级后的第一轮静默重建基线；
-- 新增「通知模式」设置项，需要旧版逐条过程动态的用户可切换为「全部状态更新」。
+- 新增「通知模式」设置项，需要旧版逐条过程动态的用户可切换为「全部状态更新」；
+- 修复 `index.mjs` 版本号未同步到 2.2.0、导致插件市场安装后仍显示「可更新 · 本地 2.1.1」的问题；自测新增「清单 / 前端 / 后端 / 面板版本号一致」检查，避免再次漏改。
 
 ## 更新记录（v2.1.1）
 
