@@ -11,6 +11,10 @@ const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const PLUGINS_DIR = join(ROOT, 'plugins')
 const REPO_URL = process.env.MARKET_REPO_URL || "https://github.com/nianfeng233/NianFeng-Chat-Plugins"
 const BRANCH = process.env.MARKET_REPO_BRANCH || "main"
+// 可选：把插件压缩包固定到某个 commit，避免国内镜像缓存 main 分支旧压缩包导致
+// 市场清单已经是新哈希、下载到的却是旧内容。
+// 用法：先提交插件改动，再以 MARKET_COMMIT=<该提交> node scripts/build-market.mjs
+const MARKET_COMMIT = String(process.env.MARKET_COMMIT || '').trim()
 
 async function walkFiles(dir, base = dir, out = []) {
   const entries = await readdir(dir, { withFileTypes: true })
@@ -71,6 +75,7 @@ async function main() {
       updatedAt: new Date().toISOString(),
       repo: REPO_URL,
       branch: BRANCH,
+      commit: MARKET_COMMIT,
       homepage: `${REPO_URL}/tree/${BRANCH}/${'plugins/' + entry.name}`,
       release: null,
     })
