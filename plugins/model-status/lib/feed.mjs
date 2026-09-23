@@ -9,7 +9,15 @@
  * auto 适配器会回退到这里。解析只取标题 / 链接 / 时间 / 正文摘要 / guid。
  */
 
-import { decodeHtmlEntities, normalizeWhitespace, stripHtml, truncateText } from './util.mjs'
+const __revision = (() => {
+  try {
+    return new URL(import.meta.url).searchParams.get('v') || ''
+  } catch (_) {
+    return ''
+  }
+})()
+const libUrl = file => `./${String(file).replace(/^\.\//, '')}${__revision ? `?v=${encodeURIComponent(__revision)}` : ''}`
+const { decodeHtmlEntities, normalizeWhitespace, stripHtml, truncateText } = await import(libUrl('util.mjs'))
 
 export function looksLikeFeed(text) {
   const raw = String(text || '').slice(0, 2000)

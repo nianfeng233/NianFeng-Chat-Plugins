@@ -16,34 +16,37 @@
  *   - 所有事件都带 at（事件时间），桥在通知阶段按 maxEventAgeMs 丢弃太旧的历史。
  */
 
-import { formatTime, normalizeWhitespace, truncateText, uniqueBy, uniqueList } from './util.mjs'
-import {
+const __revision = (() => {
+  try {
+    return new URL(import.meta.url).searchParams.get('v') || ''
+  } catch (_) {
+    return ''
+  }
+})()
+const libUrl = file => `./${String(file).replace(/^\.\//, '')}${__revision ? `?v=${encodeURIComponent(__revision)}` : ''}`
+
+/*
+ * 后端桥热重载时内核只会给 bridge.mjs 加 ?v=，静态依赖仍会命中 Node 的
+ * ESM 模块缓存。这里让整棵 lib 依赖链复用同一个 revision query，更新插件后
+ * 不需要重启后端也能加载到新的模块图。
+ */
+const { formatTime, normalizeWhitespace, truncateText, uniqueBy, uniqueList } = await import(libUrl('util.mjs'))
+const {
   componentStatusEmoji,
   componentStatusLabel,
   incidentStatusEmoji,
   incidentStatusLabel,
   impactLabel,
-} from './statuspage.mjs'
-import { googleImpactEmoji, googleImpactLabel } from './google-cloud.mjs'
-import {
+} = await import(libUrl('statuspage.mjs'))
+const { googleImpactEmoji, googleImpactLabel } = await import(libUrl('google-cloud.mjs'))
+const {
   classifyStatusText,
   extractAffectedComponents,
   localizeStatusTitle,
   summarizeStatusBody,
-} from './text.mjs'
+} = await import(libUrl('text.mjs'))
 
-export const EVENT_KIND_LABELS = {
-  incident: '服务异常',
-  recovery: '服务恢复',
-  maintenance: '计划维护',
-  component: '组件状态变化',
-  feed: '状态动态',
-  test: '测试消息',
-}
-
-export function eventKindLabel(kind) {
-  return EVENT_KIND_LABELS[String(kind || '')] || '状态更新'
-}
+export { EVENT_KIND_LABELS, eventKindLabel } from './kind.mjs'
 
 const COMPONENT_SEVERITY = {
   operational: 0,

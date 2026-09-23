@@ -15,7 +15,15 @@
  * 也不要整段英文原文刷屏。
  */
 
-import { normalizeWhitespace, truncateText } from './util.mjs'
+const __revision = (() => {
+  try {
+    return new URL(import.meta.url).searchParams.get('v') || ''
+  } catch (_) {
+    return ''
+  }
+})()
+const libUrl = file => `./${String(file).replace(/^\.\//, '')}${__revision ? `?v=${encodeURIComponent(__revision)}` : ''}`
+const { normalizeWhitespace, truncateText } = await import(libUrl('util.mjs'))
 
 const CJK_RE = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/
 

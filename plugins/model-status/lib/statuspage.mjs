@@ -11,7 +11,15 @@
  * 返回 page / status / components / incidents / scheduled_maintenances。
  */
 
-import { normalizeWhitespace, safeJsonParse, trimSlash, truncateText, uniqueList } from './util.mjs'
+const __revision = (() => {
+  try {
+    return new URL(import.meta.url).searchParams.get('v') || ''
+  } catch (_) {
+    return ''
+  }
+})()
+const libUrl = file => `./${String(file).replace(/^\.\//, '')}${__revision ? `?v=${encodeURIComponent(__revision)}` : ''}`
+const { normalizeWhitespace, safeJsonParse, trimSlash, truncateText, uniqueList } = await import(libUrl('util.mjs'))
 
 export const COMPONENT_STATUS_LABELS = {
   operational: '正常',

@@ -17,7 +17,7 @@ import {
   CATEGORY_LABELS,
   CONFIDENCE_LABELS,
 } from './lib/sources.mjs'
-import { eventKindLabel } from './lib/detect.mjs'
+import { eventKindLabel } from './lib/kind.mjs'
 import { formatTime, relativeTime, truncateText } from './lib/util.mjs'
 import {
   badge,
@@ -32,7 +32,7 @@ import {
   switchButton,
 } from './ui.mjs'
 
-export const PANEL_VERSION = '2.2.0'
+export const PANEL_VERSION = '2.2.1'
 
 const CATEGORY_ORDER = ['llm', 'coding', 'image', 'audio', 'infra', 'custom']
 

@@ -15,7 +15,15 @@ import https from 'node:https'
 import tls from 'node:tls'
 import { Buffer } from 'node:buffer'
 import { isIP } from 'node:net'
-import { isPrivateAddress, resolvePublicHttpUrl, requestPinned } from './net-guard.mjs'
+const __revision = (() => {
+  try {
+    return new URL(import.meta.url).searchParams.get('v') || ''
+  } catch (_) {
+    return ''
+  }
+})()
+const libUrl = file => `./${String(file).replace(/^\.\//, '')}${__revision ? `?v=${encodeURIComponent(__revision)}` : ''}`
+const { isPrivateAddress, resolvePublicHttpUrl, requestPinned } = await import(libUrl('net-guard.mjs'))
 
 export const DEFAULT_UA = 'NianFeng-ModelStatus/2.0 (+https://github.com/nianfeng233/NianFeng-Chat)'
 

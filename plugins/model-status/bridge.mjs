@@ -29,22 +29,37 @@
 
 import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import {
+const __revision = (() => {
+  try {
+    return new URL(import.meta.url).searchParams.get('v') || ''
+  } catch (_) {
+    return ''
+  }
+})()
+const libUrl = file => `./lib/${String(file).replace(/^\.\//, '')}${__revision ? `?v=${encodeURIComponent(__revision)}` : ''}`
+
+/*
+ * 内核热重载只会给 bridge.mjs 附加 ?v=，如果这里继续用静态 import，
+ * 更新插件时 lib/detect.mjs 仍会命中 Node 的旧模块缓存，出现
+ * “新 bridge 引用了旧 detect 里不存在的导出”而导致后端桥加载失败。
+ * 因此 bridge 对 lib 全部使用同 revision 的动态 import。
+ */
+const {
   clampNumber,
   formatTime,
   isObject,
   randomToken,
   truncateText,
   uniqueList,
-} from './lib/util.mjs'
-import { DEFAULT_UA, fetchText } from './lib/http.mjs'
-import {
+} = await import(libUrl('util.mjs'))
+const { DEFAULT_UA, fetchText } = await import(libUrl('http.mjs'))
+const {
   buildCustomSource,
   findSourceById,
   listAllSources,
   sourceUrlCandidates,
-} from './lib/sources.mjs'
-import {
+} = await import(libUrl('sources.mjs'))
+const {
   componentStatusLabel,
   incidentStatusLabel,
   isStatusPageSummary,
@@ -52,10 +67,10 @@ import {
   statusPageHistoryFeedUrl,
   statusPageOverallLabel,
   statusPageSummaryUrl,
-} from './lib/statuspage.mjs'
-import { looksLikeFeed, parseFeed } from './lib/feed.mjs'
-import { googleCloudProducts, isGoogleCloudIncidents, parseGoogleCloudIncidents } from './lib/google-cloud.mjs'
-import {
+} = await import(libUrl('statuspage.mjs'))
+const { looksLikeFeed, parseFeed } = await import(libUrl('feed.mjs'))
+const { googleCloudProducts, isGoogleCloudIncidents, parseGoogleCloudIncidents } = await import(libUrl('google-cloud.mjs'))
+const {
   collectFeedEvents,
   collectGoogleCloudEvents,
   collectStatusPageEvents,
@@ -63,10 +78,10 @@ import {
   eventMatchesSubscription,
   formatEventDigestText,
   formatEventText,
-} from './lib/detect.mjs'
+} = await import(libUrl('detect.mjs'))
 
 export const name = 'model-status-bridge'
-export const version = '2.2.0'
+export const version = '2.2.1'
 export const displayName = '模型状态订阅后端桥'
 export const description = '轮询各厂商状态页 / RSS，检测模型服务状态变化并生成渠道通知。'
 export const author = '念风扩展'

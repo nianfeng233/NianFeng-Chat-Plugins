@@ -63,7 +63,7 @@ powershell -ExecutionPolicy Bypass -File .\extensions\model-status\install.ps1
 
 ### 方式 B：上传 zip
 
-在「设置 → 插件 → 添加插件」中上传 `model-status-v2.2.0.zip`（本目录下）。上传后刷新页面，必要时点「重新扫描」。
+在「设置 → 插件 → 添加插件」中上传 `model-status-v2.2.1.zip`（本目录下）。上传后刷新页面，必要时点「重新扫描」。
 
 ### 方式 C：手动安装
 
@@ -198,6 +198,7 @@ extensions/model-status/
 │  ├─ google-cloud.mjs  Google Cloud incidents.json 解析
 │  ├─ detect.mjs        快照对比、事件过滤、通知文案
 │  ├─ text.mjs          英文状态分类、中文化、组件提取与摘要
+│  ├─ kind.mjs          事件类型中文标签（前后端共用的纯常量）
 │  ├─ http.mjs          代理 + 手动重定向的受控 HTTP 客户端
 │  └─ net-guard.mjs     SSRF 防护（DNS 固定 / 逐跳校验）
 ├─ manifest.json
@@ -215,6 +216,14 @@ node extensions/model-status/test.mjs
 
 自测不联网，覆盖来源目录、Statuspage / RSS / Atom / Google Cloud 解析、基线建立、事件去重、
 重要通知筛选、多条变化合并、英文中文化与组件筛选、通知文案截断等纯逻辑。
+
+## 更新记录（v2.2.1）
+
+- 修复外部插件热更新时 `bridge.mjs` 已重新加载、但 `lib/` 仍命中 Node 旧 ESM 模块缓存的问题：
+  - bridge 与 lib 依赖链统一使用内核传入的 `?v=` revision，更新插件后不需要重启后端也能加载新模块；
+  - 从 v2.1.1 / v2.2.0 更新到 v2.2.1 时，后端桥可以真正热加载，不再出现「重新扫描后 /api/model-status/* 404」；
+- 启动阶段的待投递通知检查改为静默 404：后端桥尚未加载完成时不再右下角弹「后端桥未加载」，
+  避免安装 / 重新扫描瞬间误报和多开页面重复弹两个；面板顶部仍会明确显示「后端桥未加载」。
 
 ## 更新记录（v2.2.0）
 

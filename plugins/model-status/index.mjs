@@ -13,7 +13,7 @@
  *     轮询 Statuspage API / RSS / Google Cloud incidents，检测状态变化。
  */
 export const name = 'model-status'
-export const version = '2.2.0'
+export const version = '2.2.1'
 export const scope = 'both'
 export const displayName = '模型状态订阅'
 export const description = '订阅 DeepSeek、Claude、GPT、Gemini、Grok 等模型厂商状态页；默认只推送服务异常 / 质量下降 / 恢复等重要节点，自动合并同一轮多条变化并中文化英文状态。'
@@ -479,7 +479,7 @@ export function apply(ctx) {
         handleNotifications(claimed)
         return
       }
-      const result = await bridgeCall('GET', '/model-status/notifications?pending=1')
+      const result = await bridgeCall('GET', '/model-status/notifications?pending=1', null, 30000, { silent404: true })
       if (result?.ok === false) return
       handleNotifications(result.notifications || [])
     })

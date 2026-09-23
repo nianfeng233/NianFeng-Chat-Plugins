@@ -10,7 +10,15 @@
  * 渠道订阅里选择具体产品，或修改关键词。
  */
 
-import { normalizeWhitespace, truncateText, uniqueBy, uniqueList } from './util.mjs'
+const __revision = (() => {
+  try {
+    return new URL(import.meta.url).searchParams.get('v') || ''
+  } catch (_) {
+    return ''
+  }
+})()
+const libUrl = file => `./${String(file).replace(/^\.\//, '')}${__revision ? `?v=${encodeURIComponent(__revision)}` : ''}`
+const { normalizeWhitespace, truncateText, uniqueBy, uniqueList } = await import(libUrl('util.mjs'))
 
 export const GOOGLE_IMPACT_LABELS = {
   SERVICE_OUTAGE: '服务中断',

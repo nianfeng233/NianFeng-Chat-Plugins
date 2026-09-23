@@ -2,7 +2,7 @@
   "id": "model-status",
   "name": "model-status",
   "displayName": "模型状态订阅",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "author": "念风扩展",
   "description": "订阅 DeepSeek、Claude、GPT、Gemini、Grok 等模型厂商状态页；默认只推送服务异常 / 质量下降 / 恢复等重要节点，自动合并同一轮的多条变化并中文化英文状态，减少过程动态刷屏。",
   "entry": "./index.mjs",
@@ -34,7 +34,7 @@
   "provides": [],
   "distribution": {
     "directory": "extensions/model-status",
-    "zip": "model-status-v2.2.0.zip",
+    "zip": "model-status-v2.2.1.zip",
     "placement": "外部插件：<数据目录>/plugins/model-status/（也可在「设置 → 插件 → 添加插件」里直接上传 zip）。安装后到「设置 → 插件」点一次「重新扫描」，新版内核会同时热加载 backend bridge。"
   },
   "scope": "both"
