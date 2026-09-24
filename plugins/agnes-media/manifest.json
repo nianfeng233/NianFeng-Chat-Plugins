@@ -1,0 +1,39 @@
+{
+  "id": "agnes-media",
+  "name": "agnes-media",
+  "displayName": "Agnes 生图 / 生视频",
+  "version": "1.0.0",
+  "author": "念风扩展",
+  "description": "Agnes 图像 / 视频模型接入：图片模型和视频模型支持下拉自动获取与手动填写，选项标注免费 / 付费状态；支持插件专属代理；生成任务异步后台执行、完成后自动发回会话；支持 message_id、网络图源、imageId 三种参考图来源。",
+  "entry": "./index.mjs",
+  "backend": "./bridge.mjs",
+  "icon": "🎨",
+  "color": "#8b5cf6",
+  "type": "extension",
+  "core": false,
+  "permissions": [
+    "network"
+  ],
+  "depends": {
+    "event-bus": "*",
+    "tool-registry": "^1.0.0",
+    "session-service": ">=2.0.0",
+    "chat-store": "^1.0.0"
+  },
+  "optionalDepends": {
+    "backend-client": ">=1.0.0",
+    "chat-permissions": "^1.0.0",
+    "config": "^1.0.0",
+    "image-service": ">=1.0.0",
+    "plugin-manager": ">=1.0.0",
+    "settings-container": "^1.0.0",
+    "toast-host": ">=1.0.0"
+  },
+  "provides": [],
+  "distribution": {
+    "directory": "extensions/agnes-media",
+    "zip": "agnes-media-v1.0.0.zip",
+    "placement": "外部插件：<数据目录>/plugins/agnes-media/（也可在「设置 → 插件 → 添加插件」里直接上传 zip）。安装后需要重启念风后端以加载 bridge.mjs。"
+  },
+  "scope": "both"
+}

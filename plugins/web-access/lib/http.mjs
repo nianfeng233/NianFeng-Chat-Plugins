@@ -85,8 +85,11 @@ async function readResponseStream(response, maxBytes) {
   return { buffer: Buffer.concat(chunks), truncated }
 }
 
-async function requestOncePinned(url, { method = 'GET', headers = {}, body, timeoutMs = 20000, maxBytes = 2 * 1024 * 1024 } = {}) {
+async function requestOncePinned(url, { method = 'GET', headers = {}, body, timeoutMs = 20000, maxBytes = 2 * 1024 * 1024, proxy = '' } = {}) {
   const { url: parsed, addresses } = await resolvePublicHttpUrl(url)
+  if (proxy) {
+    return proxiedRequest(parsed.href, { method, headers, body, proxy, timeoutMs, maxBytes })
+  }
   const response = await requestPinned(parsed, { addresses, method, headers, timeoutMs })
   const { buffer, truncated } = await readResponseStream(response, maxBytes)
   return {
@@ -131,10 +134,9 @@ async function requestOnceDirect(url, { method = 'GET', headers = {}, body, time
   }
 }
 
-/** 通过 http(s) 代理发一次请求（HTTPS 目标走 CONNECT 隧道）。 */
+/** 通过 http(s) 代理发一次请求（HTTPS 目标走 CONNECT 隧道，HTTP 目标走 absolute-form）。 */
 function proxiedRequest(url, { method = 'GET', headers = {}, body, proxy = '', timeoutMs = 20000, maxBytes = 2 * 1024 * 1024 } = {}) {
   const target = new URL(String(url))
-  if (target.protocol !== 'https:') return Promise.reject(new Error('代理模式目前只支持 https 目标'))
   let proxyUrl
   try {
     proxyUrl = new URL(String(proxy))
@@ -147,6 +149,51 @@ function proxiedRequest(url, { method = 'GET', headers = {}, body, proxy = '', t
   const auth = proxyUrl.username
     ? `Basic ${Buffer.from(`${decodeURIComponent(proxyUrl.username)}:${decodeURIComponent(proxyUrl.password)}`).toString('base64')}`
     : ''
+  const proxyHeaders = auth ? { 'Proxy-Authorization': auth } : {}
+
+  if (target.protocol === 'http:') {
+    return new Promise((resolve, reject) => {
+      let settled = false
+      const req = lib.request(
+        {
+          host: proxyUrl.hostname,
+          port,
+          method,
+          path: target.href,
+          headers: { Host: target.host, ...proxyHeaders, ...headers },
+          timeout: timeoutMs,
+        },
+        async response => {
+          try {
+            const { buffer, truncated } = await readResponseStream(response, maxBytes)
+            settled = true
+            resolve({
+              status: response.statusCode || 0,
+              headers: headersToObject(response.headers),
+              setCookie: getSetCookie(response.headers),
+              buffer,
+              truncated,
+              url: target.href,
+            })
+          } catch (error) {
+            if (!settled) {
+              settled = true
+              reject(error)
+            }
+          }
+        },
+      )
+      req.on('timeout', () => req.destroy(new Error('代理请求超时')))
+      req.on('error', error => {
+        if (!settled) {
+          settled = true
+          reject(new Error(`代理请求失败：${error.message}`))
+        }
+      })
+      if (body !== undefined && body !== null) req.write(body)
+      req.end()
+    })
+  }
 
   return new Promise((resolve, reject) => {
     let settled = false
@@ -159,8 +206,8 @@ function proxiedRequest(url, { method = 'GET', headers = {}, body, proxy = '', t
       host: proxyUrl.hostname,
       port,
       method: 'CONNECT',
-      path: `${target.hostname}:443`,
-      headers: { Host: target.hostname, ...(auth ? { 'Proxy-Authorization': auth } : {}) },
+      path: `${target.hostname}:${target.port || 443}`,
+      headers: { Host: `${target.hostname}:${target.port || 443}`, ...(auth ? { 'Proxy-Authorization': auth } : {}) },
       timeout: timeoutMs,
     })
     connectReq.on('timeout', () => {
@@ -173,17 +220,18 @@ function proxiedRequest(url, { method = 'GET', headers = {}, body, proxy = '', t
         socket.destroy()
         return fail(new Error(`代理拒绝 CONNECT：HTTP ${connectRes.statusCode}`))
       }
+      if (head?.length) socket.unshift(head)
       const tlsSocket = tls.connect({ socket, servername: target.hostname })
       tlsSocket.once('error', error => fail(new Error(`TLS 连接失败：${error.message}`)))
       tlsSocket.once('secureConnect', () => {
         const req = https.request(
           {
             host: target.hostname,
-            port: 443,
+            port: target.port || 443,
             path: `${target.pathname}${target.search}`,
             method,
             headers,
-            socket: tlsSocket,
+            createConnection: () => tlsSocket,
             servername: target.hostname,
             agent: false,
           },
@@ -230,7 +278,7 @@ export async function requestText(url, { method = 'GET', headers = {}, body, tim
 /**
  * @param {string} rawUrl
  * @param {{method?:string, headers?:object, body?:any, jar?:import('./cookies.mjs').CookieJar, timeoutMs?:number,
- *          maxBytes?:number, maxRedirects?:number, allowPrivate?:boolean, cookieSource?:string}} options
+ *          maxBytes?:number, maxRedirects?:number, allowPrivate?:boolean, cookieSource?:string, proxy?:string}} options
  */
 export async function safeFetch(rawUrl, options = {}) {
   const {
@@ -243,6 +291,7 @@ export async function safeFetch(rawUrl, options = {}) {
     maxRedirects = 5,
     allowPrivate = false,
     cookieSource = 'http',
+    proxy = '',
   } = options
 
   let currentUrl = String(rawUrl || '')
@@ -260,9 +309,13 @@ export async function safeFetch(rawUrl, options = {}) {
 
     let response
     try {
-      response = allowPrivate
-        ? await requestOnceDirect(currentUrl, { method: currentMethod, headers: hopHeaders, body: currentBody, timeoutMs, maxBytes })
-        : await requestOncePinned(currentUrl, { method: currentMethod, headers: hopHeaders, body: currentBody, timeoutMs, maxBytes })
+      if (allowPrivate) {
+        response = await requestOnceDirect(currentUrl, { method: currentMethod, headers: hopHeaders, body: currentBody, timeoutMs, maxBytes })
+      } else {
+        // 代理模式也必须先做 SSRF 校验；但 HTTPS 走代理隧道时，代理侧仍会做最终 DNS，
+        // 因此这里至少挡掉 localhost / 内网 / 云元数据这类明显危险目标。
+        response = await requestOncePinned(currentUrl, { method: currentMethod, headers: hopHeaders, body: currentBody, timeoutMs, maxBytes, proxy })
+      }
     } catch (error) {
       if (error?.status) throw error
       const wrapped = new Error(`请求失败：${error?.message || error}`)
@@ -369,6 +422,65 @@ export function extractLinks(html, baseUrl, { limit = 100 } = {}) {
     if (out.length >= limit * 3) break
   }
   return uniqueBy(out, item => item.url).slice(0, limit)
+}
+
+/** 从网页 HTML 里提取候选图片（img / source / og:image / 内联 background-image）。 */
+export function extractImageCandidates(html, baseUrl, { limit = 30 } = {}) {
+  const source = String(html || '')
+  const attr = (attrs, names) => {
+    for (const name of names) {
+      const result = new RegExp(`${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, 'i').exec(attrs)
+      const value = result ? result[1] ?? result[2] ?? result[3] ?? '' : ''
+      if (value) return decodeHtmlEntities(value)
+    }
+    return ''
+  }
+  const firstFromSrcset = value =>
+    String(value || '')
+      .split(',')
+      .map(part => part.trim().split(/\s+/)[0])
+      .filter(Boolean)[0] || ''
+  const add = (raw, extras = {}) => {
+    let value = String(raw || '').trim()
+    if (!value || value.startsWith('data:')) return
+    value = firstFromSrcset(value)
+    const url = toAbsoluteUrl(value, baseUrl)
+    if (!url || !/^https?:\/\//i.test(url)) return
+    out.push({ url, ...extras })
+  }
+  const out = []
+
+  const ogImage = matchMeta(source, ['og:image', 'twitter:image', 'twitter:image:src'])
+  if (ogImage) add(ogImage, { source: 'og:image', alt: matchMeta(source, ['og:title']) })
+
+  const tagPattern = /<(img|source)\b([^>]*)>/gi
+  let match
+  while ((match = tagPattern.exec(source))) {
+    const attrs = match[2] || ''
+    const candidate =
+      attr(attrs, ['src', 'data-src', 'data-original', 'data-lazy-src', 'data-lazy', 'data-url', 'data-actualsrc', 'data-echo']) ||
+      attr(attrs, ['srcset', 'data-srcset'])
+    const alt = attr(attrs, ['alt', 'title', 'aria-label'])
+    const width = Number(attr(attrs, ['width'])) || 0
+    const height = Number(attr(attrs, ['height'])) || 0
+    if (candidate) add(candidate, { source: match[1].toLowerCase(), alt, width, height })
+    if (out.length >= limit * 2) break
+  }
+
+  const stylePattern = /background(?:-image)?\s*:\s*url\(\s*['"]?([^'")]+)['"]?\s*\)/gi
+  while ((match = stylePattern.exec(source))) {
+    add(match[1], { source: 'background' })
+    if (out.length >= limit * 2) break
+  }
+
+  const seen = new Set()
+  return out
+    .filter(item => {
+      if (!item.url || seen.has(item.url)) return false
+      seen.add(item.url)
+      return true
+    })
+    .slice(0, limit)
 }
 
 export function extractInteractive(html, baseUrl, { limit = 40 } = {}) {

@@ -1,11 +1,12 @@
 # 联网访问（web-access）· 念风独立扩展
 
-给模型两个 function-calling 工具，并提供可视化设置面板：
+给模型三个 function-calling 工具，并提供可视化设置面板：
 
 | 工具 | 作用 |
 |---|---|
 | `web_search` | Tavily 联网搜索：标题 / 链接 / 摘要 / 可选整合答案 |
 | `browser` | 高自由度网站访问与浏览器自动化：读取网页、B站视频、抖音视频与**图文（图片+文案）**、站内搜索、页内关键词检索、点击 / 输入 / 下拉 / 滚动 / 截图 / 下载 / 登录 / Cookie 管理 |
+| `web_image` | 直接拉取公网图片 / 网页图源并送进模型上下文查看确认，返回图片原始 URL 供生图 / 生视频插件当参考图 |
 
 ## 安装
 
@@ -57,6 +58,11 @@ powershell -ExecutionPolicy Bypass -File .\extensions\web-access\install.ps1
 // 公网资料搜索
 { "query": "念风 Chat 最新版本", "max_results": 8 }
 
+// 直接看图：确认某个图源是不是想要的图片
+{ "url": "https://example.com/character.png" }
+// 网页图源：自动提取 og:image / img 候选并拉取前 2 张
+{ "url": "https://example.com/gallery", "max_images": 2 }
+
 // 读取用户发来的 B 站视频（自动返回标题、UP主、播放/点赞/投币/收藏与评论）
 { "action": "read", "url": "https://www.bilibili.com/video/BV1xx411c7mD" }
 
@@ -107,3 +113,25 @@ powershell -ExecutionPolicy Bypass -File .\extensions\web-access\install.ps1
 - **快捷登录**：面板新增「登录抖音 / 登录 B站」按钮，一键打开独立浏览器窗口；登录完成后点「同步 Cookie」即可长期复用（CDP 读取，不受 Chrome/Edge App-Bound 加密影响）。
 - **给其它插件用的服务**：后端桥现在 `ctx.provide('web-access', ...)`，提供 `search / read / readDouyin / cookieHeaderFor / cookieSummary / exportCookies / browserStatus`，
   供「点歌台（media-post）」等插件复用搜索、Cookie 与抖音图文解析能力。
+
+## v2.1.0 新能力（公网图源查看）
+
+- **新增 `web_image` 工具**：把网络图片直接拉进模型上下文查看确认。
+  - `{ "url": "https://.../a.jpg" }`：直链图片，返回 `images`（Data URI，模型可直接看到）与 `image_urls`（原始 URL）。
+  - `{ "url": "https://.../gallery", "max_images": 2 }`：网页地址会自动提取 `og:image` / `<img>` / `srcset` / 内联背景图候选，并下载前几张给模型看。
+  - `source_page` 可传 Referer 绕过部分盗链；SSRF 防护、Cookie 库、浏览器登录态与代理逻辑与 `browser` 完全共用。
+- **与 Agnes 生图 / 生视频插件联动**：模型可以按「web_search 找图源 → web_image 确认图片 → agnes_generate_image / agnes_generate_video 的 `reference_image_ids` 引用已保存图片」完成“先找参考图，再按参考图生成”的链路。`web_image` 会把看到的图同时保存到念风图片服务并返回 `image_ids`，比直接传原站 URL 更稳（不受防盗链 / Cookie 影响）。
+- 后端桥服务新增 `image(params)`，其它插件也可以直接复用「按 URL / 网页拉图」能力。
+- `safeFetch` 新增 `proxy` 参数；`web_image` 会跟随「设置 → 网络」的全局代理，也支持图源站点的 Cookie 登录态。
+
+### 一句话示例
+
+```text
+用户：你去找一下《崩坏：星穹铁道》知更鸟的图，然后帮我改成赛博朋克夜景风格。
+
+模型：
+1. web_search / browser 找到候选图源页面
+2. web_image 拉取并确认确实是知更鸟
+3. agnes_generate_image({ prompt: "赛博朋克夜景，保留角色身份与构图", reference_image_ids: ["web_image 返回的 imageId"], ratio: "3:4" })
+4. 生成完成后插件自动把图片发回会话
+```
