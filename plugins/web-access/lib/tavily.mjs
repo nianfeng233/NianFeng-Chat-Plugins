@@ -7,8 +7,21 @@
  * web-access · Tavily 联网搜索 / 网页提取客户端。
  * API Key 只保存在本机后端（AES-256-GCM 加密），不会进入模型上下文。
  */
-import { requestText } from './http.mjs'
-import { clampNumber, truncateText } from './util.mjs'
+/*
+ * 热更新缓存穿透：bridge.mjs 热重载时带 ?v= revision，lib 依赖链继续复用同一
+ * revision，避免更新插件后仍命中旧 ESM 模块缓存导致新导出缺失、后端桥 404。
+ */
+const __revision = (() => {
+  try {
+    return new URL(import.meta.url).searchParams.get('v') || ''
+  } catch (_) {
+    return ''
+  }
+})()
+const libUrl = file => `./${String(file).replace(/^\.\//, '')}${__revision ? `?v=${encodeURIComponent(__revision)}` : ''}`
+
+const { requestText } = await import(libUrl('http.mjs'))
+const { clampNumber, truncateText } = await import(libUrl('util.mjs'))
 
 const SEARCH_URL = 'https://api.tavily.com/search'
 const EXTRACT_URL = 'https://api.tavily.com/extract'

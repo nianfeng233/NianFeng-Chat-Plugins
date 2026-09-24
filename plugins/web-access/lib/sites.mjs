@@ -13,14 +13,22 @@
  * 站内搜索：B站 API / 浏览器搜索页；抖音浏览器搜索页。
  */
 import { createHash } from 'node:crypto'
-import {
-  clampNumber,
-  normalizeUrl,
-  safeJsonParse,
-  stripHtml,
-  truncateText,
-} from './util.mjs'
-import { extractHtml } from './http.mjs'
+
+/*
+ * 热更新缓存穿透：bridge.mjs 热重载时带 ?v= revision，lib 依赖链继续复用同一
+ * revision，避免更新插件后仍命中旧 ESM 模块缓存导致新导出缺失、后端桥 404。
+ */
+const __revision = (() => {
+  try {
+    return new URL(import.meta.url).searchParams.get('v') || ''
+  } catch (_) {
+    return ''
+  }
+})()
+const libUrl = file => `./${String(file).replace(/^\.\//, '')}${__revision ? `?v=${encodeURIComponent(__revision)}` : ''}`
+
+const { clampNumber, normalizeUrl, safeJsonParse, stripHtml, truncateText } = await import(libUrl('util.mjs'))
+const { extractHtml } = await import(libUrl('http.mjs'))
 
 const BILI_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0'

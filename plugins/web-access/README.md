@@ -25,7 +25,7 @@ powershell -ExecutionPolicy Bypass -File .\extensions\web-access\install.ps1
 
 ### 方式 B：上传 zip 安装
 
-在念风「设置 → 插件 → 添加插件」中上传本目录下的 `web-access-v2.0.0.zip`，安装到外部插件目录。
+在念风「设置 → 插件 → 添加插件」中上传本目录下的 `web-access-v2.1.1.zip`，安装到外部插件目录。
 
 ### 安装后怎么生效（已支持热插拔）
 
@@ -33,6 +33,7 @@ powershell -ExecutionPolicy Bypass -File .\extensions\web-access\install.ps1
 
 - **上传 zip 安装**：上传成功后会自动重载外部 `bridge.mjs`，页面刷新即可用。
 - **install.ps1 / 手动复制安装**：回到「设置 → 插件」点一次「重新扫描」即可同时热加载前端插件与后端桥。
+- **v2.1.1 起会自动拉起后端桥**：如果工具先于桥被调用（历史上出现 `BRIDGE_NOT_LOADED` / 3ms 失败），前端会先自动请求一次 `/api/plugins/rescan` 重载桥，再重试本次请求，不需要手动重启整个程序。
 - **QQ / NapCat / 微信等由服务端代聊处理的渠道**：安装 / 删除外部插件时服务端代聊会自动重启，新工具会直接进入下一轮对话，同样不需要重启本体。
 - 如果当前内核版本较旧（没有热加载能力）或热加载失败：面板会提供「重新扫描插件」和「重启念风后端」两个按钮；
   也可以手动 `stop.cmd` 后重新 `start.cmd`（或 `npm run stop && npm start`）。
@@ -113,6 +114,16 @@ powershell -ExecutionPolicy Bypass -File .\extensions\web-access\install.ps1
 - **快捷登录**：面板新增「登录抖音 / 登录 B站」按钮，一键打开独立浏览器窗口；登录完成后点「同步 Cookie」即可长期复用（CDP 读取，不受 Chrome/Edge App-Bound 加密影响）。
 - **给其它插件用的服务**：后端桥现在 `ctx.provide('web-access', ...)`，提供 `search / read / readDouyin / cookieHeaderFor / cookieSummary / exportCookies / browserStatus`，
   供「点歌台（media-post）」等插件复用搜索、Cookie 与抖音图文解析能力。
+
+## v2.1.1 修复（不需要重启的热更新）
+
+- **修复从旧版本热更新后 `bridge.mjs` 加载失败、`/api/web-access/*` 全部 404 的问题**：
+  内核热重载只会给 `bridge.mjs` 附加 `?v=revision`，静态 import 的 `./lib/*.mjs` 仍命中原进程里的旧 ESM 模块缓存。
+  v2.1.0 的 `bridge.mjs` 新增了对 `lib/http.mjs` 新导出 `extractImageCandidates` 的引用，从 v2.0.0 热更新时旧缓存里没有这个导出，
+  于是 `[channel-bridge] 热加载 ... 失败：The requested module './lib/http.mjs' does not provide an export named 'extractImageCandidates'`，
+  只能重启整个程序。v2.1.1 把 revision 沿 `bridge.mjs → lib/*.mjs` 整条依赖链传递，重新扫描即可加载新模块图。
+- **前端自动拉起后端桥**：工具调用若收到 404（`BRIDGE_NOT_LOADED`），会先自动触发一次 `/api/plugins/rescan` 再重试，10 秒冷却避免反复扫描。
+- 从 v2.0.0 / v2.1.0 升级只需覆盖文件后正常点一次「重新扫描」，或直接让模型调用一次工具自动恢复。
 
 ## v2.1.0 新能力（公网图源查看）
 

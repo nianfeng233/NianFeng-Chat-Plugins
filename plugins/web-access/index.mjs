@@ -14,7 +14,7 @@
  * 插件设置面板 / 设置页可配置 Tavily Key、浏览器路径与模式、本机浏览器 Cookie 导入。
  */
 export const name = 'web-access'
-export const version = '2.1.0'
+export const version = '2.1.1'
 export const scope = 'both'
 export const displayName = '联网访问'
 export const description = '工具 · Tavily 联网搜索 + 高自由度浏览器访问 + 公网图源拉取查看（B站 / 抖音详情评论与图文、站内搜索、Cookie 登录复用与导出）。'
@@ -188,7 +188,30 @@ export function apply(ctx) {
 
   useStyle(ctx, PANEL_CSS)
 
-  const callBackend = async (path, body, timeoutMs) => {
+  /**
+   * 后端桥缺失时自动拉起：内核的 /api/plugins/rescan 会重载外部插件目录下的
+   * bridge.mjs（见 server/index.mjs 的 createExternalBridgeLoader 包装）。
+   * 这里做 10 秒冷却，避免模型连续调用工具时反复扫描；rescan 失败则静默降级为
+   * 原来的 BRIDGE_NOT_LOADED 提示。
+   */
+  let bridgeRescanPromise = null
+  let bridgeRescannedAt = 0
+  const requestBridgeRescan = () => {
+    if (bridgeRescanPromise) return bridgeRescanPromise
+    if (Date.now() - bridgeRescannedAt < 10000) return Promise.resolve(null)
+    const api = ctx.registry.get('api')
+    if (!api?.post) return Promise.resolve(null)
+    bridgeRescannedAt = Date.now()
+    bridgeRescanPromise = api
+      .post('/plugins/rescan', {}, { timeoutMs: 60000 })
+      .catch(() => null)
+      .finally(() => {
+        bridgeRescanPromise = null
+      })
+    return bridgeRescanPromise
+  }
+
+  const callBackend = async (path, body, timeoutMs, retried = false) => {
     const api = ctx.registry.get('api')
     if (!api?.post) {
       return { ok: false, code: 'BACKEND_OFFLINE', error: '本地后端未就绪（backend-client 插件未启用或后端未启动）。', hint: '请先在 设置 → 网络 确认后端连接正常。' }
@@ -198,11 +221,20 @@ export function apply(ctx) {
       return result && typeof result === 'object' ? result : { ok: true, result }
     } catch (error) {
       if (error?.status === 404) {
+        // 多数 404 是“插件刚安装 / 更新，只热更了前端，后端 bridge.mjs 还没加载”。
+        // 自动触发一次重新扫描再重试，能省掉“必须重启整个程序”的坑。
+        if (!retried) {
+          const rescued = await requestBridgeRescan()
+          if (rescued) {
+            await new Promise(resolve => setTimeout(resolve, 150))
+            return callBackend(path, body, timeoutMs, true)
+          }
+        }
         return {
           ok: false,
           code: 'BRIDGE_NOT_LOADED',
           error: '联网访问后端桥尚未加载。',
-          hint: '请到 设置 → 插件 点「重新扫描」热加载外置后端桥；如果当前内核版本较旧或不支持热加载，再 stop 后重新 start。',
+          hint: '已自动尝试重新加载后端桥但仍未成功：请到 设置 → 插件 删除 web-access 后重新上传 zip 安装，或 stop 后重新 start 念风后端。',
         }
       }
       return {

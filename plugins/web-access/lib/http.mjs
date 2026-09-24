@@ -15,8 +15,24 @@ import http from 'node:http'
 import https from 'node:https'
 import tls from 'node:tls'
 import { Buffer } from 'node:buffer'
-import { requestPinned, resolvePublicHttpUrl } from './net-guard.mjs'
-import { decodeHtmlEntities, firstString, normalizeWhitespace, stripHtml, toAbsoluteUrl, truncateText, uniqueBy } from './util.mjs'
+
+/*
+ * 热更新缓存穿透：bridge.mjs 热重载时带 ?v= revision，lib 依赖链继续复用同一
+ * revision，避免更新插件后仍命中旧 ESM 模块缓存导致新导出缺失、后端桥 404。
+ */
+const __revision = (() => {
+  try {
+    return new URL(import.meta.url).searchParams.get('v') || ''
+  } catch (_) {
+    return ''
+  }
+})()
+const libUrl = file => `./${String(file).replace(/^\.\//, '')}${__revision ? `?v=${encodeURIComponent(__revision)}` : ''}`
+
+const { requestPinned, resolvePublicHttpUrl } = await import(libUrl('net-guard.mjs'))
+const { decodeHtmlEntities, firstString, normalizeWhitespace, stripHtml, toAbsoluteUrl, truncateText, uniqueBy } = await import(
+  libUrl('util.mjs'),
+)
 
 const DEFAULT_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0'

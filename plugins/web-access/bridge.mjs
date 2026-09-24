@@ -24,16 +24,38 @@ import { createReadStream } from 'node:fs'
 import { chmod, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto'
 import { join } from 'node:path'
-import { BrowserController } from './lib/browser.mjs'
-import { CookieJar, importLocalBrowserCookies, localBrowserOverview, parseCookieInput, registrableDomain } from './lib/cookies.mjs'
-import { extractImageCandidates, safeFetch } from './lib/http.mjs'
-import { findTextMatches, readPage, readDouyinDetail, searchBilibili, searchDouyin, detectSiteKind } from './lib/sites.mjs'
-import { tavilyExtract, tavilySearch } from './lib/tavily.mjs'
-import { clampNumber, maskSecret, normalizeUrl, sleep, truncateText } from './lib/util.mjs'
+
+/*
+ * 热更新缓存穿透（v2.1.1）：内核热重载 bridge.mjs 时会附带 ?v=revision，
+ * 但静态 import 的 ./lib/*.mjs 不会带上该 revision，会命中原进程里旧的
+ * Node ESM 模块缓存。旧 lib 缺少新 bridge 需要的导出时（例如 v2.0.0 ->
+ * v2.1.0 的 extractImageCandidates），热加载直接失败、/api/web-access/*
+ * 全部 404，只能重启整个程序。这里让整棵 lib 依赖链复用 bridge 的 revision，
+ * 重新扫描 / 自动拉起后端桥时就能加载到新模块图，不再需要重启。
+ */
+const __revision = (() => {
+  try {
+    return new URL(import.meta.url).searchParams.get('v') || ''
+  } catch (_) {
+    return ''
+  }
+})()
+const libUrl = file => `./lib/${String(file).replace(/^\.\//, '')}${__revision ? `?v=${encodeURIComponent(__revision)}` : ''}`
+
+const { BrowserController } = await import(libUrl('browser.mjs'))
+const { CookieJar, importLocalBrowserCookies, localBrowserOverview, parseCookieInput, registrableDomain } = await import(
+  libUrl('cookies.mjs'),
+)
+const { extractImageCandidates, safeFetch } = await import(libUrl('http.mjs'))
+const { findTextMatches, readPage, readDouyinDetail, searchBilibili, searchDouyin, detectSiteKind } = await import(
+  libUrl('sites.mjs'),
+)
+const { tavilyExtract, tavilySearch } = await import(libUrl('tavily.mjs'))
+const { clampNumber, maskSecret, normalizeUrl, sleep, truncateText } = await import(libUrl('util.mjs'))
 
 export const name = 'web-access-bridge'
-export const version = '2.1.0'
-export const build = '2026-09-24-web-image1'
+export const version = '2.1.1'
+export const build = '2026-09-25-hotreload-cache1'
 export const displayName = '联网访问后端桥'
 export const description = '联网搜索 · 浏览器自动化 · 公网图源拉取查看 · Cookie 库（Tavily / Edge·Chrome / B站 / 抖音 / 图文读取与导出）'
 export const core = false

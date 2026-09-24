@@ -18,7 +18,23 @@ import { spawn } from 'node:child_process'
 import { existsSync, readdirSync } from 'node:fs'
 import { mkdir, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
-import { randomToken, sleep } from './util.mjs'
+
+/*
+ * 热更新缓存穿透：内核热重载只会给 bridge.mjs 附带 ?v= revision，如果 lib 之间
+ * 继续用静态 import，更新插件时仍会命中原进程里旧的 Node ESM 模块缓存，出现
+ * “新 bridge + 旧 lib（缺少新导出）”导致后端桥加载失败、接口 404。
+ * 这里把 revision 继续传给依赖链，保证热更新后加载到的是一整棵新模块图。
+ */
+const __revision = (() => {
+  try {
+    return new URL(import.meta.url).searchParams.get('v') || ''
+  } catch (_) {
+    return ''
+  }
+})()
+const libUrl = file => `./${String(file).replace(/^\.\//, '')}${__revision ? `?v=${encodeURIComponent(__revision)}` : ''}`
+
+const { randomToken, sleep } = await import(libUrl('util.mjs'))
 
 export class BrowserError extends Error {
   constructor(code, message, hint = '') {

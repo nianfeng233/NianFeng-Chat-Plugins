@@ -2,7 +2,7 @@
   "id": "web-access",
   "name": "web-access",
   "displayName": "联网访问",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "author": "念风扩展",
   "description": "Tavily 联网搜索 + 高自由度浏览器访问 + 公网图源拉取查看：读取网页 / B站视频、抖音视频与图文（图片+文案）、站内搜索、页内关键词检索、点击输入登录、截图下载；可直接把网上图片拉进模型上下文确认；Cookie 登录态自动保存复用，并可导出给 yt-dlp 等下载器。",
   "entry": "./index.mjs",
@@ -29,8 +29,8 @@
   "provides": [],
   "distribution": {
     "directory": "extensions/web-access",
-    "zip": "web-access-v2.1.0.zip",
-    "placement": "外部插件：<数据目录>/plugins/web-access/（也可在「设置 → 插件 → 添加插件」里直接上传 zip）。安装后需要重启念风后端以加载 bridge.mjs。"
+    "zip": "web-access-v2.1.1.zip",
+    "placement": "外部插件：<数据目录>/plugins/web-access/（也可在「设置 → 插件 → 添加插件」里直接上传 zip）。新版内核会在安装 / 重新扫描时自动热加载 bridge.mjs，无需重启；旧内核或热加载失败时再重启念风后端。"
   },
   "scope": "both"
 }
