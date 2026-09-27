@@ -11,7 +11,7 @@
  * 几块纯代码能力，默认都不经过 LLM：
  *   1. 入群申请自动审核：
  *      - QQ 等级限制；查不到等级（隐藏）直接拒绝；
- *      - 进群白词 / 黑词；黑词命中直接拉黑；
+ *      - 进群白词 / 黑词；白词优先于黑词，未命中白词时黑词才直接拉黑；
  *      - 每个群一份黑名单，也支持多群共用一个黑名单；
  *      - 被踢 / 主动退群 / 连续被拒绝达到次数自动拉黑；
  *      - 拉黑后若人还在群里，自动触发踢出；
@@ -29,10 +29,10 @@
  */
 
 export const name = 'napcat-group-guard'
-export const version = '2.0.6'
+export const version = '2.0.7'
 export const scope = 'both'
 export const displayName = '群管助手'
-export const description = '扩展 · NapCat 群自动管理：仅响应显式配置的群；入群申请自动审核（等级 / 白词 / 黑词 / 共享黑名单）、申请 / 进出群档案图与定时清理不活跃成员；退群 / 被踢与自动拉黑合并为一条提示；档案图服务端渲染，不需要 WebUI 页面常驻。'
+export const description = '扩展 · NapCat 群自动管理：仅响应显式配置的群；入群申请自动审核（白词优先于黑词、等级 / 共享黑名单）、申请 / 进出群档案图与定时清理不活跃成员；退群 / 被踢与自动拉黑合并为一条提示；档案图服务端渲染，不需要 WebUI 页面常驻。'
 export const author = '念风扩展'
 export const icon = '🛡️'
 export const core = false
@@ -1258,10 +1258,11 @@ export function apply(ctx) {
   /**
    * 纯函数判定：
    *   1. 已在黑名单 -> 拒绝；
-   *   2. 命中黑词 -> 拒绝并拉黑；
-   *   3. 需要等级但查不到（隐藏）-> 按约定拒绝；
-   *   4. 等级低于限制 -> 拒绝；
-   *   5. 配置了白词但回答不包含任何白词 -> 拒绝。
+   *   2. 回答命中白词 -> 白词优先，不再执行黑词拦截；
+   *   3. 未命中白词时命中黑词 -> 拒绝并拉黑；
+   *   4. 需要等级但查不到（隐藏）-> 按约定拒绝；
+   *   5. 等级低于限制 -> 拒绝；
+   *   6. 配置了白词但回答不包含任何白词 -> 拒绝。
    * 除黑名单 / 黑词外的拒绝会累计「连续被拒绝」次数，达到上限自动拉黑。
    */
   function decideJoin(rule, { level = null, answer = '', isBlacklisted = false } = {}) {
@@ -1269,7 +1270,10 @@ export function apply(ctx) {
       return { approve: false, reason: '黑名单用户', countRejection: false, autoBlacklist: false, blacklistReason: '' }
     }
 
-    const blackHit = matchWords(answer, rule.blacklistWords)
+    // 白名单词是用户对入群回答的显式放行条件，优先级高于黑名单词：
+    // 同一句回答同时命中白词和黑词时按白词放行，避免把明确允许的人误拉黑。
+    const whiteHit = rule.whitelistWords.length ? matchWords(answer, rule.whitelistWords) : ''
+    const blackHit = whiteHit ? '' : matchWords(answer, rule.blacklistWords)
     if (blackHit) {
       return {
         approve: false,
@@ -1288,13 +1292,10 @@ export function apply(ctx) {
     if (rule.minLevel > 0 && level !== null && level < rule.minLevel) {
       return { approve: false, reason: `等级低于${rule.minLevel}`, countRejection: true, autoBlacklist: false, blacklistReason: '' }
     }
-    if (rule.whitelistWords.length) {
-      const whiteHit = matchWords(answer, rule.whitelistWords)
-      if (!whiteHit) {
-        return { approve: false, reason: rule.answerRejectReason, countRejection: true, autoBlacklist: false, blacklistReason: '' }
-      }
+    if (rule.whitelistWords.length && !whiteHit) {
+      return { approve: false, reason: rule.answerRejectReason, countRejection: true, autoBlacklist: false, blacklistReason: '' }
     }
-    return { approve: true, reason: '', countRejection: false, autoBlacklist: false, blacklistReason: '', matched: true }
+    return { approve: true, reason: '', countRejection: false, autoBlacklist: false, blacklistReason: '', matched: true, whitelist: whiteHit }
   }
 
   async function fetchApplicantInfo(instanceId, qq) {
@@ -3630,7 +3631,7 @@ export function apply(ctx) {
 
   const guardToolDefinition = {
     description:
-      'NapCat 群管助手。status 查看当前配置与黑名单概况；blacklist_add / blacklist_remove / blacklist_list / blacklist_kick 管理共享黑名单（按 QQ 号精确匹配，加入后会自动踢出仍在群里的成员，并向关联群发拉黑提示）；group_config_get / group_config_set / group_config_reset 查看或按群覆盖独立规则（等级 / 白词 / 黑词 / 黑名单 / 进出群提示 / 清理参数等）；cleanup_preview 预览长期未活跃成员；cleanup_trigger 把当前群（或 group 指定群）的下一轮清理倒计时直接缩减为立即触发，随后插件按正常流程先 @全体预告、等待配置分钟数、再批量踢人，踢完播报下一轮时间；cleanup_kick 直接执行“已发过预告、等待踢人”的待办，不再补发预告；cleanup_run 兼容旧行为，手动强制所有启用清理的群立即走一轮。默认作用于当前群。',
+      'NapCat 群管助手。status 查看当前配置与黑名单概况；blacklist_add / blacklist_remove / blacklist_list / blacklist_kick 管理共享黑名单（按 QQ 号精确匹配，加入后会自动踢出仍在群里的成员，并向关联群发拉黑提示）；group_config_get / group_config_set / group_config_reset 查看或按群覆盖独立规则（等级 / 白词优先于黑词 / 黑名单 / 进出群提示 / 清理参数等）；cleanup_preview 预览长期未活跃成员；cleanup_trigger 把当前群（或 group 指定群）的下一轮清理倒计时直接缩减为立即触发，随后插件按正常流程先 @全体预告、等待配置分钟数、再批量踢人，踢完播报下一轮时间；cleanup_kick 直接执行“已发过预告、等待踢人”的待办，不再补发预告；cleanup_run 兼容旧行为，手动强制所有启用清理的群立即走一轮。默认作用于当前群。',
     parameters: {
       type: 'object',
       properties: {
@@ -3801,8 +3802,8 @@ export function apply(ctx) {
         bool('autoReview', '自动审核入群申请', '覆盖全局的自动审核开关') +
         text('minLevel', '最低 QQ 等级', '数字；留空继承全局', { type: 'number', width: 90 }) +
         bool('requireVisibleLevel', '隐藏等级必须拒绝', '查不到 qqLevel 时按约定拒绝') +
-        text('whitelist', '进群白词', '用 / 、 逗号或换行分隔；留空继承全局', { emptyButton: true, width: 260 }) +
-        text('blacklist', '进群黑词', '命中任意一个直接拒绝并拉黑', { emptyButton: true, width: 260 }) +
+        text('whitelist', '进群白词', '用 / 、 逗号或换行分隔；留空继承全局；白词优先于黑词', { emptyButton: true, width: 260 }) +
+        text('blacklist', '进群黑词', '命中任意一个直接拒绝并拉黑；同时命中白词时按白词放行', { emptyButton: true, width: 260 }) +
         text('blacklistId', '绑定的黑名单名称', '多个群填同一个名字即可共用', { width: 160 }) +
         text('maxReject', '连续拒绝拉黑次数', '0 = 不自动拉黑；留空继承全局', { type: 'number', width: 90 }) +
         bool('notifyOnRequest', '申请处理提示', '黑名单用户反复申请时始终静默'),
@@ -3979,8 +3980,8 @@ export function apply(ctx) {
             settingsRow('最低 QQ 等级', '低于该等级拒绝，原因写「等级低于xx」；0 表示不限制等级', settingsInput('napcat.groupGuard.minLevel', config.get('napcat.groupGuard.minLevel', 0), { type: 'number', width: 90 })) +
             settingsRow('隐藏等级必须拒绝', '查不到 qqLevel（隐藏 / 未返回）时拒绝，原因固定为「qq等级查询失败请打开后重试」', settingsToggle('napcat.groupGuard.requireVisibleLevel', toBool(config.get('napcat.groupGuard.requireVisibleLevel'), true))) +
             settingsRow('连续拒绝拉黑次数', '连续被自动拒绝达到该次数后加入黑名单；0 表示不自动拉黑', settingsInput('napcat.groupGuard.maxReject', config.get('napcat.groupGuard.maxReject', 2), { type: 'number', width: 90 })) +
-            settingsRow('进群白词', '回答必须包含任意一个词才放行（用 / 、 逗号或换行分隔）；留空则不校验回答', settingsInput('napcat.groupGuard.answerWhitelist', config.get('napcat.groupGuard.answerWhitelist', ''), { width: 260, placeholder: 'b站/抖音/github' })) +
-            settingsRow('进群黑词', '回答命中任意一个词直接拒绝并拉黑', settingsInput('napcat.groupGuard.answerBlacklist', config.get('napcat.groupGuard.answerBlacklist', ''), { width: 260, placeholder: '广告/代练/加群' })) +
+            settingsRow('进群白词', '回答必须包含任意一个词才放行（用 / 、 逗号或换行分隔）；白词优先于黑词，留空则不校验回答', settingsInput('napcat.groupGuard.answerWhitelist', config.get('napcat.groupGuard.answerWhitelist', ''), { width: 260, placeholder: 'b站/抖音/github' })) +
+            settingsRow('进群黑词', '回答命中任意一个词直接拒绝并拉黑；若同时命中白词则按白词放行', settingsInput('napcat.groupGuard.answerBlacklist', config.get('napcat.groupGuard.answerBlacklist', ''), { width: 260, placeholder: '广告/代练/加群' })) +
             settingsRow('白词未命中原因', '回答不包含白词时的拒绝理由', settingsInput('napcat.groupGuard.answerRejectReason', config.get('napcat.groupGuard.answerRejectReason', DEFAULT_ANSWER_REJECT_REASON), { width: 280, placeholder: DEFAULT_ANSWER_REJECT_REASON })) +
             settingsRow('黑词拒绝原因', '支持 {word} 占位符', settingsInput('napcat.groupGuard.blackwordRejectReason', config.get('napcat.groupGuard.blackwordRejectReason', DEFAULT_BLACKWORD_REJECT_REASON), { width: 280, placeholder: DEFAULT_BLACKWORD_REJECT_REASON })) +
             settingsRow('申请提示模板', '支持 {nickname} {qq} {level} {answer} {result} {reason} {group} {group_id} {time}', settingsTextarea('napcat.groupGuard.notifyTemplate', config.get('napcat.groupGuard.notifyTemplate', DEFAULT_NOTIFY_TEMPLATE), { rows: 5, width: 340 })),
