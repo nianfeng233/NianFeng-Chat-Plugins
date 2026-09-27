@@ -28,7 +28,7 @@ import {
 import { formatTime, relativeTime, truncate } from './lib/util.mjs'
 
 /** 面板版本：更新后可直接在标题里看到，避免浏览器 / 模块缓存导致分不清加载的是哪版。 */
-const PANEL_VERSION = '2.1.0'
+const PANEL_VERSION = '2.1.1'
 
 const AUTO_MODES = [
   { value: 'off', label: '关闭：只通知，不分析' },

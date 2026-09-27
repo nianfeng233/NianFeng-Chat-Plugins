@@ -107,6 +107,53 @@ test('normalizeGithubEvent 解析 IssuesEvent / PushEvent / ReleaseEvent', () =>
   assert.match(eventToChannelText(releaseEvent), /v1.0.0/)
 })
 
+test('ReleaseEvent 只保留最终发布态，并用同一通知键合并多条 action', () => {
+  const raw = (action, release = {}) => ({
+    id: `rel-${action}`,
+    type: 'ReleaseEvent',
+    created_at: '2026-09-15T00:00:00Z',
+    actor: { login: 'alice' },
+    repo: { name: 'a/b', url: 'https://api.github.com/repos/a/b' },
+    payload: {
+      action,
+      release: { id: 41, tag_name: 'v1.0.0', name: 'First', body: 'hello', html_url: 'https://github.com/a/b/releases/tag/v1.0.0', ...release },
+    },
+  })
+  // draft 创建、发布后编辑等中间动作不再单独通知
+  assert.equal(normalizeGithubEvent(raw('created', { draft: true })), null)
+  assert.equal(normalizeGithubEvent(raw('edited')), null)
+  const published = normalizeGithubEvent(raw('published'))
+  assert.equal(published.kind, 'release')
+  assert.match(published.actionText, /发布了新 Release/)
+  assert.equal(published.notifyKey, 'a/b:release:41')
+  // GitHub 同时投递预发布 / 正式发布动作时，通知键与 published 相同，由桥层去重
+  const prereleased = normalizeGithubEvent(raw('prereleased', { prerelease: true }))
+  const released = normalizeGithubEvent(raw('released'))
+  assert.equal(prereleased.notifyKey, published.notifyKey)
+  assert.equal(released.notifyKey, published.notifyKey)
+  assert.match(prereleased.actionText, /预发布/)
+  assert.match(released.actionText, /正式/)
+  // API 直接创建为已发布的 Release：created + published_at 仍应通知
+  const createdPublished = normalizeGithubEvent(raw('created', { published_at: '2026-09-15T00:00:00Z' }))
+  assert.equal(createdPublished.kind, 'release')
+  assert.match(createdPublished.actionText, /发布了新 Release/)
+})
+
+test('PushEvent 不再把 tag 推送 / 分支删除当作分支更新', () => {
+  const raw = (ref, extra = {}) => ({
+    id: `push-${ref}`,
+    type: 'PushEvent',
+    created_at: '2026-09-15T00:00:00Z',
+    actor: { login: 'alice' },
+    repo: { name: 'a/b', url: 'https://api.github.com/repos/a/b' },
+    payload: { ref, after: 'abc123', size: 1, ...extra },
+  })
+  assert.equal(normalizeGithubEvent(raw('refs/tags/v1.0.0')), null)
+  assert.equal(normalizeGithubEvent(raw('refs/heads/main', { deleted: true })), null)
+  assert.equal(normalizeGithubEvent(raw('refs/heads/main')).kind, 'push')
+})
+
+
 test('Webhook payload 转 Events API 结构，并与轮询事件使用同一个稳定 key', () => {
   const updatedAt = '2026-09-22T00:00:00Z'
   const apiEvent = {

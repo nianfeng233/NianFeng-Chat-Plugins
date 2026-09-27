@@ -409,6 +409,9 @@ export const normalizeGithubEvent = raw => {
       const commits = Array.isArray(payload.commits) ? payload.commits : []
       const headCommit = payload.head_commit || commits[commits.length - 1] || {}
       const ref = String(payload.ref || '')
+      /* 标签推送不归“分支更新”管：一次 Release 会顺带推送 tag，旧逻辑会把它
+       * 当成第二条分支更新；标签/分支创建与删除分别由 create / delete 事件负责。 */
+      if (ref.startsWith('refs/tags/') || payload.deleted === true) return null
       const branch = ref.replace(/^refs\/heads\//, '').replace(/^refs\/tags\//, '')
       const head = String(payload.after || headCommit.sha || '')
       const before = String(payload.before || '')
@@ -444,17 +447,35 @@ export const normalizeGithubEvent = raw => {
     case 'ReleaseEvent': {
       const action = String(payload.action || '')
       const release = payload.release || {}
+      const draft = release.draft === true
+      /* 一次发版 GitHub 会分别投递 created / prereleased / published / edited 等多条
+       * release webhook。这里只保留最终发布态，避免同一次发版在渠道里刷出多条通知：
+       * - published：普通发布 / 预发布都会投递，作为主通知；
+       * - prereleased：部分环境只会投递预发布动作，作为兜底保留；
+       * - released：预发布转为正式发布；
+       * - created 且 published_at 非空：API 直接创建已发布 Release 的情况。
+       * 这些动作共用不带 action 的 notifyKey，渠道侧只生成一条通知。 */
+      const isFinalReleaseAction =
+        !draft &&
+        (action === 'published' ||
+          action === 'released' ||
+          action === 'prereleased' ||
+          (action === 'created' && !!release.published_at))
+      if (!isFinalReleaseAction) return null
+      const releaseKey = String(release.id || release.tag_name || '').trim()
       return {
         ...base,
         kind: 'release',
         action,
-        actionText: action === 'published' ? '发布了新 Release' : action === 'created' ? '创建了 Release' : action === 'released' ? '发布了 Release' : `Release ${action}`,
+        /* published / prereleased / released 可能连续到达；通知去重键不带 action。 */
+        notifyKey: releaseKey ? `${repo}:release:${releaseKey}` : base.id,
+        actionText: action === 'released' ? '发布了正式 Release' : action === 'prereleased' ? '发布了预发布 Release' : '发布了新 Release',
         tag: String(release.tag_name || ''),
         name: String(release.name || ''),
         url: String(release.html_url || ''),
         body: String(release.body || ''),
         prerelease: release.prerelease === true,
-        draft: release.draft === true,
+        draft,
         publishedAt: String(release.published_at || release.created_at || ''),
       }
     }

@@ -62,7 +62,7 @@ import {
 import { renderEventCard } from './lib/card.mjs'
 
 export const name = 'github-hub-bridge'
-export const version = '2.1.0'
+export const version = '2.1.1'
 export const displayName = 'GitHub 助手后端桥'
 export const description = '订阅仓库事件推送、GitHub 只读检索与 LLM Issue 分析回复。'
 export const author = '念风扩展'
@@ -971,6 +971,8 @@ export function apply(ctx) {
 
   const compactEvent = event => ({
     id: event?.id || '',
+    /* 同一次 Release 的不同 action 共用 notifyKey；最近动态 / 通知都据此合并。 */
+    notifyKey: event?.notifyKey || '',
     kind: event?.kind || '',
     action: event?.action || '',
     actionText: event?.actionText || '',
@@ -1004,7 +1006,9 @@ export function apply(ctx) {
   }
 
   const notificationKeyOf = (event, channelId, kind = '') => {
-    const eventId = String(event?.id || '').trim()
+    /* release 的 published / prereleased / released 可能连续到达；
+     * normalizeGithubEvent 会给出不带 action 的 notifyKey，渠道侧只推第一条。 */
+    const eventId = String(event?.notifyKey || event?.id || '').trim()
     if (!eventId) return ''
     return `${eventId}:${String(kind || event?.kind || '')}:${String(channelId || '')}`
   }
@@ -1465,6 +1469,10 @@ export function apply(ctx) {
   /* ---------------- 轮询 ---------------- */
 
   const recordEvent = event => {
+    /* published / prereleased / released 属于同一次 Release：只保留第一条，
+     * 避免「最近动态」也出现多份同版本记录。 */
+    const notifyKey = String(event?.notifyKey || '')
+    if (notifyKey && state.events.some(item => String(item?.notifyKey || '') === notifyKey)) return
     state.events.unshift(compactEvent(event))
     if (state.events.length > MAX_EVENTS) state.events.length = MAX_EVENTS
   }
