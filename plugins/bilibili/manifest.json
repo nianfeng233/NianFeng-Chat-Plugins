@@ -1,0 +1,43 @@
+{
+  "id": "bilibili",
+  "name": "bilibili",
+  "displayName": "哔哩哔哩",
+  "version": "1.6.0",
+  "author": "念风扩展",
+  "description": "B站渠道：应用内扫码 / Edge 托管登录，私信与消息中心（回复我 / @我 / 点赞 / 系统）收发，视频评论扫描、主动评论与回复；UID 黑白名单与名单外处理策略。",
+  "entry": "./index.mjs",
+  "backend": "./bridge.mjs",
+  "icon": "📺",
+  "color": "#fb7299",
+  "type": "channel",
+  "core": false,
+  "permissions": [
+    "network"
+  ],
+  "depends": {
+    "channel-base": "^1.0.0",
+    "channel-list": ">=1.0.0",
+    "channel-registry": ">=1.0.0",
+    "channel-detail-host": ">=3.0.0",
+    "config": ">=1.1.0",
+    "event-bus": "*",
+    "session-service": "^2.0.0",
+    "toast-host": ">=1.0.0",
+    "tool-registry": "^1.0.0"
+  },
+  "optionalDepends": {
+    "backend-client": ">=1.0.0",
+    "chat-store": ">=1.0.0",
+    "message-service": ">=1.0.0",
+    "chat-permissions": ">=1.0.0",
+    "plugin-manager": ">=1.0.0",
+    "settings-container": ">=1.0.0"
+  },
+  "provides": [],
+  "distribution": {
+    "directory": "extensions/bilibili",
+    "zip": "bilibili-v1.6.0.zip",
+    "placement": "外部插件：<数据目录>/plugins/bilibili/；安装后在「渠道 → 添加渠道」里选择「哔哩哔哩」"
+  },
+  "scope": "both"
+}

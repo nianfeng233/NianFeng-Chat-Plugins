@@ -3,7 +3,7 @@
   "name": "念风官方插件仓库",
   "repo": "https://github.com/nianfeng233/NianFeng-Chat-Plugins",
   "branch": "main",
-  "updatedAt": "2026-09-27T08:28:10.116Z",
+  "updatedAt": "2026-09-29T15:10:31.763Z",
   "plugins": [
     {
       "id": "agnes-media",
@@ -29,6 +29,31 @@
       "branch": "main",
       "commit": "d839613401907b0f687fe327664ec03b403d9ab3",
       "homepage": "https://github.com/nianfeng233/NianFeng-Chat-Plugins/tree/main/plugins/agnes-media",
+      "release": null
+    },
+    {
+      "id": "bilibili",
+      "name": "哔哩哔哩",
+      "displayName": "哔哩哔哩",
+      "version": "1.6.0",
+      "description": "B站渠道：应用内扫码 / Edge 托管登录，私信与消息中心（回复我 / @我 / 点赞 / 系统）收发，视频评论扫描、主动评论与回复；UID 黑白名单与名单外处理策略。",
+      "author": "念风扩展",
+      "icon": "📺",
+      "license": "Apache-2.0",
+      "path": "plugins/bilibili",
+      "entry": "index.mjs",
+      "scope": "both",
+      "permissions": [
+        "network"
+      ],
+      "tags": [],
+      "minAppVersion": "2.0.0",
+      "hashType": "content-sha256",
+      "sha256": "64fff9f284cab649b5c4fee1196531b8967870a9e81ba097867a6cfa084b9560",
+      "updatedAt": "2026-09-29T15:10:20.435Z",
+      "repo": "https://github.com/nianfeng233/NianFeng-Chat-Plugins",
+      "branch": "main",
+      "homepage": "https://github.com/nianfeng233/NianFeng-Chat-Plugins/tree/main/plugins/bilibili",
       "release": null
     },
     {
