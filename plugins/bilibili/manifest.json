@@ -2,9 +2,9 @@
   "id": "bilibili",
   "name": "bilibili",
   "displayName": "哔哩哔哩",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "author": "念风扩展",
-  "description": "B站渠道：应用内扫码 / Edge 托管登录，私信与消息中心（回复我 / @我 / 点赞 / 系统）收发，视频评论扫描、主动评论与回复；UID 黑白名单与名单外处理策略。",
+  "description": "B站渠道：应用内扫码 / Edge 托管登录；私信与评论按对端 UID 统一入同一聊天记录库，视频信息与相关评论树自动带入上下文；消息中心（回复我 / @我 / 点赞 / 系统）收发，视频评论扫描、主动评论与回复；UID 黑白名单与名单外处理策略。",
   "entry": "./index.mjs",
   "backend": "./bridge.mjs",
   "icon": "📺",
@@ -36,7 +36,7 @@
   "provides": [],
   "distribution": {
     "directory": "extensions/bilibili",
-    "zip": "bilibili-v1.6.0.zip",
+    "zip": "bilibili-v1.7.0.zip",
     "placement": "外部插件：<数据目录>/plugins/bilibili/；安装后在「渠道 → 添加渠道」里选择「哔哩哔哩」"
   },
   "scope": "both"

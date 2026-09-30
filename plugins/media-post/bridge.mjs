@@ -40,7 +40,7 @@ import { downloadDirect, extractBvid, resolveBilibili } from './lib/bilibili.mjs
 import { encode as silkEncode, isSilk as isSilkBuffer } from './vendor/silk-wasm/lib/index.mjs'
 
 export const name = 'media-post-bridge'
-export const version = '2.1.0'
+export const version = '2.2.0'
 export const displayName = '点歌台后端桥'
 export const description = '媒体下载 / 转码 / 缓存与 NapCat 语音、QQ 官方机器人 SILK 语音、视频、文件发送'
 export const core = false
@@ -796,6 +796,8 @@ export function apply(ctx) {
       napcatChannels: channels,
       qqbot: !!qqbotService,
       qqbotVoice: !!qqbotService && qqbotService.supportsVoice?.() !== false,
+      qqbotVideo: !!qqbotService && qqbotService.supportsVideo?.() !== false,
+      qqbotFile: !!qqbotService && qqbotService.supportsFile?.() !== false,
     })
   })
 
@@ -982,6 +984,68 @@ export function apply(ctx) {
           caption: body.caption,
         }),
       )
+    }
+
+    // QQ 官方机器人视频 / 文件 / 图文：直接走官方富媒体上传（file_type=2/4/1），
+    // 不再降级成链接。媒体文件从 media-post 缓存目录读取（或在配置 fileBaseUrl
+    // 时用 HTTP 文件回传地址），由 qqbot 服务完成下载与发送。
+    if (looksQqbot && ['video', 'file', 'images'].includes(mode)) {
+      const supported =
+        mode === 'video'
+          ? qqbotService.supportsVideo?.() !== false
+          : mode === 'file'
+            ? qqbotService.supportsFile?.() !== false
+            : true
+      const caption = state.config.sendCaption ? String(body.caption || '').slice(0, 200) : ''
+      if (supported) {
+        const mediaItems = records.map(record => ({
+          file: sourceOf(record),
+          name: record.file || `${record.title || 'media'}`,
+          mime: record.mime || '',
+          title: record.title || '',
+        }))
+        const payload = mode === 'video' ? { videos: mediaItems } : mode === 'file' ? { files: mediaItems } : { images: mediaItems }
+        const sent = await Promise.resolve(
+          qqbotService.send({
+            channelId: qqbotChannelId,
+            text: caption,
+            ...payload,
+          }),
+        ).catch(error => ({ ok: false, code: 'SEND_FAILED', error: error?.message || String(error) }))
+        if (sent?.ok) {
+          const messageId = sent.id || sent.messageId || sent.msgId || ''
+          ctx.logger?.info?.(
+            `[media-post] QQ 官方${mode === 'video' ? '视频' : mode === 'file' ? '文件' : '图片'}发送成功：channel=${qqbotChannelId} messageId=${messageId || '（接口未回传 id）'}`,
+          )
+          return httpApi.sendJson(res, 200, {
+            ok: true,
+            success: true,
+            target: 'qqbot',
+            targetSource: 'qqbot',
+            mode,
+            fileFormat: mode,
+            messageId,
+            msgId: sent.msgId || '',
+            media: records.map(publicRecord),
+            caption,
+            fileUrls: state.config.fileBaseUrl ? records.map(fileUrlOf) : [],
+          })
+        }
+        ctx.logger?.warn?.(
+          `[media-post] QQ 官方${mode}发送失败：channel=${qqbotChannelId} code=${sent?.code || 'SEND_FAILED'} error=${sent?.error || '未知错误'}`,
+        )
+        return httpApi.sendJson(
+          res,
+          200,
+          fallbackPayload({
+            records,
+            mode,
+            code: sent?.code || 'SEND_FAILED',
+            reasonText: sent?.error || `QQ 官方机器人${mode}发送失败`,
+            caption: body.caption,
+          }),
+        )
+      }
     }
 
     const napcatChannelId = String(body.napcatChannelId || '').trim()

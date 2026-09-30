@@ -6,6 +6,7 @@
 import { libUrl } from './rev.mjs'
 
 const { normalizeNotice } = await import(libUrl('normalize.mjs'))
+const { fetchCommentThread } = await import(libUrl('comment-thread.mjs'))
 
 const SEEN_LIMIT = 200
 const KINDS = ['reply', 'at', 'like', 'system']
@@ -187,6 +188,24 @@ export class NoticeModule {
       // 反查失败时不要拿视频标题冒充对方说的话，明确告诉模型“正文没拿到”。
       item.text = '（未能读取到原评论内容，请结合视频信息判断对方意图）'
       item.textMissing = true
+    }
+    // 评论 / @ 通知：只有当前评论本身是楼中楼回复（root 与当前 rpid 不同）时才需要
+    // 拉父级链；顶层 @ 的正文已经在 item.text 里，不必额外请求接口。
+    const treeRoot = String(item.target?.root || '')
+    const treeCurrent = String(item.target?.rpid || '')
+    if (['reply', 'at'].includes(item.kind) && treeCurrent && treeRoot && treeRoot !== treeCurrent && (item.target.oid || item.target.bvid)) {
+      try {
+        item.commentTree = await fetchCommentThread(this.transport, {
+          oid: item.target.oid || '',
+          type: Number(item.target.type) || 1,
+          bvid: item.target.bvid || '',
+          root: treeRoot,
+          rpid: treeCurrent,
+          limit: 12,
+        })
+      } catch (err) {
+        this.logger?.debug?.(`[bilibili] 拉取评论树失败 rpid=${treeCurrent}：${err?.message || err}`)
+      }
     }
     return item
   }

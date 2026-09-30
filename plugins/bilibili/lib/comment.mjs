@@ -13,6 +13,7 @@ import { libUrl } from './rev.mjs'
 
 const { RateLimitedQueue } = await import(libUrl('queue.mjs'))
 const { normalizeComment, parseTarget } = await import(libUrl('normalize.mjs'))
+const { commentBranch } = await import(libUrl('comment-thread.mjs'))
 const { sleep } = await import(libUrl('util.mjs'))
 
 const SEEN_LIMIT = 300
@@ -163,6 +164,8 @@ export class CommentModule {
             parent: root && root !== '0' ? String(raw?.rpid || '') : '',
           })
           if (!item) continue
+          // 评论扫描时数据已经在这里，直接构造当前评论的父级链，不再额外请求 B站。
+          item.commentTree = commentBranch(flat, item.target.rpid, { limit: 12 })
           if (String(item.sender.uid) === String(selfUid)) continue
           if (known.has(item.target.rpid)) continue
           known.add(item.target.rpid)

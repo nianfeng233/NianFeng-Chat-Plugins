@@ -15,10 +15,10 @@
  *   其它渠道   → 降级为「标题 + 时长 + 原链接 + 本地缓存路径」的普通消息（图文会附图片）。
  */
 export const name = 'media-post'
-export const version = '2.1.0'
+export const version = '2.2.0'
 export const scope = 'both'
 export const displayName = '点歌台 · 媒体放映机'
-export const description = '扩展 · B站 / 抖音视频与图文：点歌发 QQ 语音（NapCat / QQ 官方机器人），发视频 / 图文，其它渠道降级为文件或链接。'
+export const description = '扩展 · B站 / 抖音视频与图文：点歌发 QQ 语音（NapCat / QQ 官方机器人），视频 / 文件 / 图文直发 NapCat 与 QQ 官方机器人，其它渠道降级为文件或链接。'
 export const author = '念风扩展'
 export const icon = '🎬'
 export const core = false
@@ -90,12 +90,13 @@ const PLAY_DESCRIPTION =
 const SEND_DESCRIPTION =
   '把 B站 / 抖音链接里的内容拉下来发到当前渠道（或 channel 指定的渠道）。' +
   'mode=voice：只提取音频；NapCat 发 record 语音，QQ 官方机器人会转成 SILK 后通过官方富媒体接口发送；' +
-  '其它渠道降级发文件 / 链接（用户说「放一下 / 来首 / 点歌」时用这个）。' +
-  'mode=video：下载视频直发（用户发链接说「把这个视频发出来 / 发群里」时用这个）。' +
+  'mode=video：下载视频直发；NapCat 发 video 段，QQ 官方机器人上传 file_type=2 后发送；' +
+  'mode=file：下载后按文件直发；NapCat 发 file 段，QQ 官方机器人上传 file_type=4 后发送。' +
   'mode=images：抖音图文（图片 + 文案），发图片组。' +
   'mode=auto：链接本身是图文就发图文，否则发视频。' +
   'caption 是随媒体一起发的一句话，可省略；不要重复用户原话。' +
-  '返回 delivered=fallback 表示目标渠道不支持媒体直发，消息已按「标题 + 原链接 + 本地缓存路径」发出；' +
+  '当用户让你把视频 / 文件发到某个 QQ 渠道时，直接用本工具并指定 channel；不要回答不会发，也不要把视频链接当作已发送。' +
+  '返回 delivered=fallback 表示目标渠道确实不支持媒体直发，消息已按「标题 + 原链接 + 本地缓存路径」发出；' +
   'NEED_LOGIN → 提示用户去「设置 → 点歌台」点登录；FFMPEG_UNAVAILABLE → 提示用户点「一键安装缺失工具」。'
 
 const MODE_LABEL = { voice: 'QQ 语音', video: '视频', file: '文件', images: '图文' }

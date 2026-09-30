@@ -13,12 +13,13 @@ import { BILIBILI_CSS } from './style.mjs'
 import { renderQrSvg } from './qrcode.mjs'
 import { DEFAULT_POLICY, normalizePolicy, decide, describeDecision } from './lib/policy.mjs'
 import { KIND_LABEL, previewText } from './lib/normalize.mjs'
+import { formatCommentTree } from './lib/comment-thread.mjs'
 
 export const name = 'bilibili'
-export const version = '1.6.0'
+export const version = '1.7.0'
 export const scope = 'both'
 export const displayName = '哔哩哔哩'
-export const description = 'B站渠道：扫码 / Edge 托管登录，私信与消息中心（回复我 / @我 / 点赞 / 系统）收发，评论扫描与主动评论；UID 黑白名单与名单外处理策略。'
+export const description = 'B站渠道：扫码 / Edge 托管登录，私信与评论按对端 UID 统一入同一聊天记录库；消息中心（回复我 / @我 / 点赞 / 系统）收发，评论扫描与主动评论；UID 黑白名单与名单外处理策略。'
 export const author = '念风扩展'
 export const icon = '📺'
 export const core = false
@@ -109,6 +110,24 @@ const DEFAULT_SETTINGS = {
   videos: [],
   autoOwnVideos: false,
   policy: DEFAULT_POLICY,
+}
+
+/** 评论 / 私信 / @ 通知统一以对端 UID 作为会话归属；没有 UID 时退回旧 thread.key。 */
+export function bilibiliPeerUidOf(item) {
+  if (!item || typeof item !== 'object') return ''
+  const thread = item.thread || {}
+  const target = item.target || {}
+  const direct = String(thread.peerUid || target.peerUid || '')
+  if (direct) return direct
+  return String(item.sender?.uid || '')
+}
+
+export function bilibiliThreadChannelId(channel, item) {
+  const peerUid = bilibiliPeerUidOf(item)
+  const key = peerUid
+    ? `uid:${peerUid}`
+    : String(item?.thread?.key || `${item?.kind || 'msg'}:${item?.sender?.uid || item?.id || 'unknown'}`)
+  return `${TYPE_ID}:${channel?.id || ''}:${key}`
 }
 
 function clone(value) {
@@ -323,20 +342,17 @@ export function apply(ctx) {
 
   /* ---------------- 会话：一个对端 / 一个稿件线程一个容器 ---------------- */
 
-  function threadChannelId(channel, item) {
-    const key = String(item?.thread?.key || `${item?.kind || 'msg'}:${item?.sender?.uid || item?.id || 'unknown'}`)
-    return `${TYPE_ID}:${channel.id}:${key}`
-  }
-
   async function ensureConversation(channel, item) {
     if (!isBiliChannel(channel)) return null
     const role = roleOf(channel)
     const roleId = channel.meta?.roleId || role?.meta?.roleId || role?.id || channel.id
     const permissions = permissionsOf(channel)
     const identity = channelIdentity(channel)
-    const stableChannelId = threadChannelId(channel, item)
+    const stableChannelId = bilibiliThreadChannelId(channel, item)
     const thread = item?.thread || {}
-    const isDm = item?.kind === 'dm'
+    const peerUid = bilibiliPeerUidOf(item)
+    const peerName = String(item?.sender?.name || '').trim()
+    const threadKey = peerUid ? `uid:${peerUid}` : String(thread.key || '')
     const findByKey = () => {
       let found = typeof sessions.findByChannelId === 'function' ? sessions.findByChannelId(stableChannelId) : null
       if (!found && channel.meta?.conversationId) {
@@ -344,15 +360,34 @@ export function apply(ctx) {
         if (
           candidate &&
           String(candidate.meta?.bilibiliChannelId || '') === String(channel.id) &&
-          String(candidate.meta?.bilibiliThreadKey || '') === String(thread.key || '')
+          (String(candidate.meta?.bilibiliPeerUid || '') === peerUid || String(candidate.meta?.bilibiliThreadKey || '') === threadKey)
         ) {
           found = candidate
         }
       }
       return found
     }
-    let conv = findByKey()
-    // 首次后端同步完成前先等 ready，避免同一个线程在两次启动里被创建成多个空会话。
+    /**
+     * 迁移旧版本按「稿件 / 通知线程」拆出来的会话：只要能在 thread / 消息元数据里
+     * 找到同一个对端 UID，就复用它作为该 UID 的统一聊天记录库，不再新开一份。
+     */
+    const findLegacyByIdentity = () => {
+      if (!peerUid) return null
+      return (
+        threadConversations(channel.id).find(conv => {
+          const meta = conv?.meta || {}
+          if (String(meta.bilibiliPeerUid || '') === peerUid) return true
+          const legacyThread = meta.bilibiliThread || {}
+          if (String(legacyThread.peerUid || '') === peerUid) return true
+          return (Array.isArray(conv.messages) ? conv.messages : []).some(message => {
+            const messageMeta = message?.meta || {}
+            return String(messageMeta.senderUid || messageMeta.peerUid || '') === peerUid
+          })
+        }) || null
+      )
+    }
+    let conv = findByKey() || findLegacyByIdentity()
+    // 首次后端同步完成前先等 ready，避免同一个对端在两次启动里被创建成多个空会话。
     if (
       !conv &&
       typeof sessions.ready === 'function' &&
@@ -364,22 +399,24 @@ export function apply(ctx) {
       } catch (_) {
         /* 离线 / 后端不可用时继续用本地会话 */
       }
-      conv = findByKey()
+      conv = findByKey() || findLegacyByIdentity()
     }
-    const label = isDm
-      ? `私信 · ${item?.sender?.name || item?.sender?.uid || '未知用户'}`
-      : `${KIND_LABEL[item?.kind] || '评论'} · ${thread.name || thread.bvid || thread.oid || '未命名'}`
+    const previousChannelId = String(conv?.meta?.channelId || '')
+    const stableName = `${role?.name || '角色'} · B站 · ${peerName || peerUid || '未命名'}`
     const metaPatch = {
       channelId: stableChannelId,
       channelType: TYPE_ID,
-      channelGroup: isDm ? 'private' : 'group',
+      // UID 统一会话按“与某个人的直接对话”处理，评论 / 私信都写进同一份记录。
+      channelGroup: 'private',
       source: TYPE_ID,
       roleId,
       bilibiliChannelId: channel.id,
-      bilibiliThreadKey: String(thread.key || ''),
+      bilibiliPeerUid: peerUid,
+      bilibiliPeerName: peerName,
+      bilibiliThreadKey: threadKey,
       bilibiliThread: {
         kind: item?.kind || 'comment',
-        peerUid: isDm ? thread.peerUid || item?.target?.peerUid || '' : '',
+        peerUid: peerUid || thread.peerUid || item?.target?.peerUid || '',
         oid: thread.oid || item?.target?.oid || '',
         type: Number(thread.type || item?.target?.type) || 0,
         bvid: thread.bvid || item?.target?.bvid || '',
@@ -397,8 +434,8 @@ export function apply(ctx) {
       crossReadable: permissions.crossRead === true,
       crossSendable: permissions.crossSend === true,
       sensitiveConfirm: permissions.confirm !== false,
-      contextMode: isDm ? '' : 'channel-only',
-      contextMessages: isDm ? 0 : 40,
+      contextMode: '',
+      contextMessages: 0,
       contextRounds: 0,
       persona: role?.meta?.persona ?? conv?.meta?.persona ?? '',
       model: role?.meta?.model ?? conv?.meta?.model ?? '',
@@ -409,15 +446,28 @@ export function apply(ctx) {
     }
     if (!conv) {
       conv = sessions.create({
-        name: `${role?.name || '角色'} · B站${label}`,
+        name: stableName,
         avatar: role?.avatar || (role?.name || 'B').slice(0, 1),
         c1: role?.c1,
         c2: role?.c2,
-        preview: `${role?.name || '角色'} 的 B站渠道 · ${label}`,
+        preview: `${role?.name || '角色'} 的 B站渠道 · ${peerName || peerUid || '未命名'}`,
         meta: metaPatch,
       })
     } else {
-      sessions.update(conv.id, { meta: { ...(conv.meta || {}), ...metaPatch } })
+      const rename = peerName && !String(conv.name || '').includes(peerName)
+      sessions.update(conv.id, {
+        meta: { ...(conv.meta || {}), ...metaPatch },
+        ...(rename ? { name: stableName } : {}),
+      })
+      // 旧版本按稿件 / 通知线程建的索引：迁移到 UID 稳定 channelId 后删掉旧键，
+      // 避免设置页同时出现「旧视频渠道」和「UID 统一渠道」两份记录。
+      if (previousChannelId && previousChannelId !== stableChannelId && typeof store?.removeChannel === 'function') {
+        try {
+          store.removeChannel(previousChannelId)
+        } catch (_) {
+          /* 旧索引不存在时忽略 */
+        }
+      }
     }
     if (String(channel.meta?.conversationId || '') !== String(conv.id)) {
       channels.updateChannel(findTab(channel.id), channel.id, {
@@ -510,14 +560,26 @@ export function apply(ctx) {
     if (videoUrl) contextParts.push(`链接：${videoUrl}`)
     if (video?.owner) contextParts.push(`UP：${video.owner}`)
     if (video?.desc) contextParts.push(`简介：${String(video.desc).replace(/\s+/g, ' ').slice(0, 300)}`)
-    const contextText = contextParts.length ? `【B站视频信息】${contextParts.join('；')}` : ''
+    // 评论树由后端通过 B站接口实时拉取：只包含当前评论的父级链（主楼 -> ... -> 当前评论），
+    // 同层其他人的回复不会混进来。私信没有评论树时这里为空。
+    const commentTreeText = Array.isArray(item.commentTree) && item.commentTree.length
+      ? formatCommentTree(item.commentTree, { selfUid: channel.meta?.accountUid || '' })
+      : ''
+    const treeSection = commentTreeText
+      ? `【相关评论树（B站实时拉取，仅包含与本次消息相关的这一条评论链）】\n${commentTreeText}`
+      : ''
+    const contextText = contextParts.length
+      ? `【B站视频信息】${contextParts.join('；')}${treeSection ? `\n${treeSection}` : ''}`
+      : treeSection
+        ? `【B站评论上下文】\n${treeSection}`
+        : ''
     const messageMeta = {
       via: TYPE_ID,
       direction: 'inbound',
       bilibiliChannelId: channel.id,
       bilibiliKind: item.kind,
-      bilibiliThreadKey: String(item.thread?.key || ''),
-      peerUid: String(item.target?.peerUid || item.thread?.peerUid || ''),
+      bilibiliThreadKey: String(conv.meta?.bilibiliThreadKey || item.thread?.key || ''),
+      peerUid: String(bilibiliPeerUidOf(item) || item.target?.peerUid || item.thread?.peerUid || ''),
       senderId: `bili:${senderUid}`,
       senderUid,
       senderNickname: item.sender?.name || '',
@@ -539,28 +601,41 @@ export function apply(ctx) {
       else messages?.add?.(conv.id, { role: 'user', status: 'sent', ...payload })
     }
 
-    // 1) 每个会话首次收到该稿件内容时，先单独写入一条「视频信息」顶层消息。
+    // 1) 视频信息 + 当前评论链单独写入一条顶层 user 消息：
+    //    同一条评论链（同稿件 + 同 root）更新同一条，避免每来一条回复就新增一份视频信息。
     if (contextText) {
-      const contextKey = `${video?.bvid || item.target?.bvid || item.target?.oid || ''}:${Number(item.target?.type) || 1}`
-      if (String(conv.meta?.bilibiliVideoContextKey || '') !== contextKey) {
+      const contextKey = `${video?.bvid || item.target?.bvid || item.target?.oid || 'comment'}:${Number(item.target?.type) || 1}:${String(item.target?.root || item.target?.rpid || '')}`
+      const contextMeta = {
+        via: TYPE_ID,
+        direction: 'inbound',
+        bilibiliVideoContext: true,
+        bilibiliVideoContextKey: contextKey,
+        bilibiliChannelId: channel.id,
+        video: video ? { bvid: video.bvid || '', title: video.title || '', url: videoUrl, owner: video.owner || '' } : undefined,
+      }
+      let existing = null
+      try {
+        existing = (sessions.messages(conv.id) || []).find(message => String(message?.meta?.bilibiliVideoContextKey || '') === contextKey) || null
+      } catch (_) {
+        /* 会话消息不可读时走追加 */
+      }
+      if (existing) {
+        const messageId = String(existing.message_id || existing.id || '')
+        if (messageId && String(existing.content || '') !== contextText) {
+          try {
+            sessions.updateMessage(conv.id, messageId, { content: contextText, meta: { ...(existing.meta || {}), ...contextMeta } })
+          } catch (_) {
+            /* 更新失败时保留旧消息，至少不影响本轮回复 */
+          }
+        }
+      } else {
         appendUser({
           content: contextText,
           sender_id: 'bili:video-context',
           sender_name: 'B站视频信息',
           source: TYPE_ID,
-          meta: {
-            via: TYPE_ID,
-            direction: 'inbound',
-            bilibiliVideoContext: true,
-            bilibiliChannelId: channel.id,
-            video: video ? { bvid: video.bvid || '', title: video.title || '', url: videoUrl, owner: video.owner || '' } : undefined,
-          },
+          meta: contextMeta,
         })
-        try {
-          sessions.update(conv.id, { meta: { ...(conv.meta || {}), bilibiliVideoContextKey: contextKey } })
-        } catch (_) {
-          /* ignore */
-        }
       }
     }
 
