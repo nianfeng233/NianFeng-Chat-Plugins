@@ -1046,6 +1046,37 @@ export function apply(ctx) {
           type: 'string',
           description: '可选：指定 NapCat 连接 id；省略时自动匹配目标已绑定的渠道、默认连接或唯一在线连接。',
         },
+        videos: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '可选视频列表：https 直链 / data URL / 本地文件路径，NapCat 会按 video 段发送。',
+        },
+        files: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '可选文件列表：https 直链 / data URL / 本地文件路径，NapCat 会按 file 段发送。',
+        },
+        audios: {
+          type: 'array',
+          items: { type: 'string' },
+          description: '可选语音列表：https 直链 / data URL / 本地文件路径，NapCat 会按 record 语音段发送。',
+        },
+        attachments: {
+          type: 'array',
+          description: '可选多格式附件：每项形如 {"type":"video","url":"https://.../a.mp4","name":"a.mp4"}，type=image/video/file/audio。',
+          items: {
+            type: 'object',
+            properties: {
+              type: { type: 'string', enum: ['image', 'video', 'file', 'audio'] },
+              url: { type: 'string' },
+              data_url: { type: 'string' },
+              file: { type: 'string' },
+              name: { type: 'string' },
+              mime: { type: 'string' },
+            },
+            required: ['type'],
+          },
+        },
       }
       for (const [key, value] of Object.entries(extra)) {
         if (properties[key] === undefined) {
