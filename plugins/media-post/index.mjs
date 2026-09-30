@@ -15,7 +15,7 @@
  *   其它渠道   → 降级为「标题 + 时长 + 原链接 + 本地缓存路径」的普通消息（图文会附图片）。
  */
 export const name = 'media-post'
-export const version = '2.2.1'
+export const version = '2.2.2'
 export const scope = 'both'
 export const displayName = '点歌台 · 媒体放映机'
 export const description = '扩展 · B站 / 抖音视频与图文：点歌发 QQ 语音（NapCat / QQ 官方机器人），视频 / 文件 / 图文直发 NapCat 与 QQ 官方机器人，其它渠道降级为文件或链接。'

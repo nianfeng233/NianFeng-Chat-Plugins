@@ -2,7 +2,7 @@
   "id": "media-post",
   "name": "media-post",
   "displayName": "点歌台 · 媒体放映机",
-  "version": "2.2.1",
+  "version": "2.2.2",
   "author": "念风扩展",
   "description": "B站 / 抖音视频与图文插件：点歌发 QQ 语音（NapCat record / QQ 官方机器人 SILK）；视频 / 文件 / 图文在 NapCat 与 QQ 官方机器人均可直发，其它渠道降级为文件 / 链接；依赖「联网访问」提供搜索、Cookie 与抖音图文解析。",
   "entry": "./index.mjs",
@@ -34,7 +34,7 @@
   "provides": [],
   "distribution": {
     "directory": "extensions/media-post",
-    "zip": "media-post-v2.2.1.zip",
+    "zip": "media-post-v2.2.2.zip",
     "placement": "外部插件：<数据目录>/plugins/media-post/（需同时安装并启用「联网访问」web-access v1.1.0+）"
   },
   "scope": "both"

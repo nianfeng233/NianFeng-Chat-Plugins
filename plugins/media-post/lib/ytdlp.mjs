@@ -10,7 +10,9 @@
  */
 import { readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
-import { run } from './tools.mjs'
+import { libUrl } from './rev.mjs'
+
+const { run } = await import(libUrl('tools.mjs'))
 
 function launcher(tool) {
   if (!tool?.available) return null

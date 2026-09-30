@@ -94,5 +94,6 @@ powershell -ExecutionPolicy Bypass -File .\extensions\media-post\install.ps1 -Da
 | NapCat 收不到语音 | 插件会先按 mp3 发 `record`，被 NapCat 拒绝时**自动转 amr 重试一次**（需要 ffmpeg）；仍失败时降级消息里会带 `未直发原因：<code> <error>`，把这段和 NapCat 日志发我即可继续定位 |
 | QQ 官方机器人收不到语音 | QQ 官方语音只接受 SILK；插件会用 ffmpeg 转 PCM → 内置 silk-wasm 编码。若返回 `FFMPEG_UNAVAILABLE` 就先去「设置 → 点歌台」安装 ffmpeg；若返回 `VOICE_FORMAT_INVALID` / `850019`，把 `media-post` 目录下的日志和 QQ 返回原文发来 |
 | QQ 里视频能收到但打开 0:00 / 黑屏 | 下载到的流是 QQ 播放器不支持的 **AV1 / H.265**（B站 `fnval=4048` 会返回 AV1）。修复版已改为只请求 DASH、优先 H.264 + AAC，并在发送前检查编码，必要时转码；清掉旧缓存后重发即可 |
+| 更新插件后视频仍是旧效果 | v2.2.2 起 bridge 会带着热更新 revision 重载整个 lib / vendor 依赖链，避免「新 bridge + 旧 lib」。若你的内核版本仍缓存了旧后端桥，更新插件后在插件页点一次「重新扫描插件」；仍无效就重启一次念风后端，确保 `bridge.mjs` 重新加载 |
 | 远程 NapCat 取不到文件 | 「默认行为 → 媒体直链地址」填 `http://<本机局域网IP>:8788`；本机 NapCat 留空即可 |
 | 非 NapCat / 非 QQ 官方渠道 | 会降级成标题 + 链接 + 本地路径；视频 / 文件 / 图文直发目前仍以 NapCat 为主 |

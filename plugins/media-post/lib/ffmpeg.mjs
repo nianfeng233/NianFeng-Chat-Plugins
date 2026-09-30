@@ -5,7 +5,9 @@
  * media-post · ffmpeg 封装（只做我们需要的几件事：抽音频 / 转 mp3、amr / 探时长）
  */
 import { stat } from 'node:fs/promises'
-import { run } from './tools.mjs'
+import { libUrl } from './rev.mjs'
+
+const { run } = await import(libUrl('tools.mjs'))
 
 const AUDIO_FORMATS = {
   mp3: {

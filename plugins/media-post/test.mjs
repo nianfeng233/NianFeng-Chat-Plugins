@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { formatDuration, normalizeKeyword, parseDuration, rankCandidates, scoreCandidate } from './lib/match.mjs'
 import { signWbi, mixinKey, pickBilibiliStreams } from './lib/bilibili.mjs'
+import { libUrl } from './lib/rev.mjs'
 import { cacheStats, getRecord, listRecords, prune, publicRecord, readRecord, removeRecord, saveBuffer } from './lib/store.mjs'
 
 const checks = []
@@ -32,6 +33,16 @@ check('无关候选分数明显更低', noMatch.score < ranked[0].score - 40, `$
 /* ---------- WBI 签名（与 web-access 同算法，做个稳定性快照） ---------- */
 check('WBI mixinKey 长度 32', mixinKey('7e1c2b4a9f8d6e5c7a3b1d9f0e2c4a6b3d5f7a9c1e3b5d7f9a0c2e4b6d8f0a1c').length === 32)
 check('WBI 签名稳定', signWbi({ bvid: 'BV1wJDzB6EaV', cid: 37326096011 }, '7e1c2b4a9f8d6e5c', '3a1b5c7d9e0f2a4b', 1700000000).w_rid.length === 32)
+
+/* ---------- 热更新缓存穿透 ---------- */
+{
+  const previous = globalThis.__MEDIA_POST_BRIDGE_REV
+  globalThis.__MEDIA_POST_BRIDGE_REV = 'rev-test'
+  check('libUrl 在热更新时携带 revision', libUrl('tools.mjs') === './tools.mjs?v=rev-test')
+  if (previous === undefined) delete globalThis.__MEDIA_POST_BRIDGE_REV
+  else globalThis.__MEDIA_POST_BRIDGE_REV = previous
+}
+
 
 /* ---------- B站选流：优先 QQ 能播的 H.264 + AAC，避免 AV1 空视频 ---------- */
 {

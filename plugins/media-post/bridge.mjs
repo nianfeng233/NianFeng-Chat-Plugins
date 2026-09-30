@@ -21,7 +21,33 @@ import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { createReadStream } from 'node:fs'
 import { join, isAbsolute } from 'node:path'
 import { randomBytes } from 'node:crypto'
-import {
+const __revision = (() => {
+  try {
+    return new URL(import.meta.url).searchParams.get('v') || ''
+  } catch (_) {
+    return ''
+  }
+})()
+// 内核热重载只会给 bridge.mjs 附 ?v=revision；这里让 lib / vendor 依赖也带上同一
+// revision，避免出现「新 bridge + 旧 lib」的半加载状态（例如仍用旧的 AV1 下载逻辑）。
+globalThis.__MEDIA_POST_BRIDGE_REV = __revision
+const bridgeLibUrl = file => {
+  const clean = String(file).replace(/^\.\//, '')
+  return new URL(`./lib/${clean}${__revision ? `?v=${encodeURIComponent(__revision)}` : ''}`, import.meta.url).href
+}
+const bridgeVendorUrl = file => {
+  const clean = String(file).replace(/^\.\//, '')
+  return new URL(`./vendor/${clean}${__revision ? `?v=${encodeURIComponent(__revision)}` : ''}`, import.meta.url).href
+}
+const [store, tools, ytdlp, ffmpeg, bilibili, silk] = await Promise.all([
+  import(bridgeLibUrl('store.mjs')),
+  import(bridgeLibUrl('tools.mjs')),
+  import(bridgeLibUrl('ytdlp.mjs')),
+  import(bridgeLibUrl('ffmpeg.mjs')),
+  import(bridgeLibUrl('bilibili.mjs')),
+  import(bridgeVendorUrl('silk-wasm/lib/index.mjs')),
+])
+const {
   cacheStats,
   getRecord,
   listRecords,
@@ -32,15 +58,15 @@ import {
   removeRecord,
   saveBuffer,
   saveFile,
-} from './lib/store.mjs'
-import { installFfmpeg, installYtDlp, run, toolStatus } from './lib/tools.mjs'
-import { download as ytdlpDownload } from './lib/ytdlp.mjs'
-import { transcodeAudio } from './lib/ffmpeg.mjs'
-import { downloadDirect, extractBvid, resolveBilibili } from './lib/bilibili.mjs'
-import { encode as silkEncode, isSilk as isSilkBuffer } from './vendor/silk-wasm/lib/index.mjs'
+} = store
+const { installFfmpeg, installYtDlp, run, toolStatus } = tools
+const { download: ytdlpDownload } = ytdlp
+const { transcodeAudio } = ffmpeg
+const { downloadDirect, extractBvid, resolveBilibili } = bilibili
+const { encode: silkEncode, isSilk: isSilkBuffer } = silk
 
 export const name = 'media-post-bridge'
-export const version = '2.2.1'
+export const version = '2.2.2'
 export const displayName = '点歌台后端桥'
 export const description = '媒体下载 / 转码 / 缓存与 NapCat 语音、QQ 官方机器人 SILK 语音、视频、文件发送'
 export const core = false
