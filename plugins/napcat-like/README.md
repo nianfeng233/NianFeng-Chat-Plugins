@@ -14,8 +14,9 @@ NapCat / OneBot 11 渠道扩展，包含三个能力：
    支持按群覆盖规则。
 3. **chat_send 定向发送**：不修改念风本体源码，在运行时给已有的 `chat_send`
    工具扩展 `qq` / `group` / `instance_id` 参数。模型传 `qq` 或 `group`
-   时，会通过 NapCat 直接向指定 QQ / 群发消息，不要求目标已配置成渠道；
-   不传时仍走本体原来的 `chat_send` 逻辑。
+   时，会通过 NapCat 直接向指定 QQ / 群发送消息，不要求目标已配置成渠道；
+   支持同时发送文本、图片、视频、语音与文件（`images` / `videos` / `files` /
+   `audios` / `attachments`）；不传时仍走本体原来的 `chat_send` 逻辑。
 
 > 本插件不修改 `plugins/features/chat-tools` 等本体文件。`chat_send` 的参数扩展是
 > 外部插件在内存中完成的：给 `tool-registry` 里的 `chat_send` 记录临时追加
@@ -41,7 +42,7 @@ powershell -ExecutionPolicy Bypass -File .\extensions\napcat-like\install.ps1
 
 ### 方式二：zip
 
-把 `napcat-like-v2.0.0.zip` 拖进「设置 → 插件 → 添加插件」即可。
+把 `napcat-like-v2.1.0.zip` 拖进「设置 → 插件 → 添加插件」即可。
 安装 / 重新扫描后，外部桥 `bridge.mjs` 会自动热加载；如果旧版本没有热加载逻辑，
 重启一次念风后端即可。
 
@@ -147,9 +148,23 @@ powershell -ExecutionPolicy Bypass -File .\extensions\napcat-like\install.ps1
 }
 ```
 
+```json
+{
+  "messages": ["看看这个视频和文件"],
+  "qq": "123456789",
+  "videos": ["https://example.com/demo.mp4"],
+  "files": [{ "url": "https://example.com/report.pdf", "name": "report.pdf" }],
+  "end": true
+}
+```
+
 - `qq` / `group` 只能填一个，同时填会返回参数错误；
 - `qq` 必须是 3-20 位数字；
 - `group` 可以填群号，也可以填一个已配置群聊渠道的群名；
+- 支持随消息发送 `images` / `videos` / `files` / `audios` / `attachments`：
+  - `attachments` 每项为 `{ "type": "image|video|file|audio", "url": "...", "name": "..." }`；
+  - 单类媒体每次最多 4 个；
+  - 视频、文件、语音会转成 NapCat 的 video / file / record 消息段直接发送。
 - 不传这两个参数时，仍走本体 `chat_send` 原逻辑（`channel` 参数、当前渠道等）；
 - `instance_id` 可选。省略时按以下顺序选连接：
   1. 目标 QQ / 群已绑定的 NapCat 渠道；

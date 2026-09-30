@@ -27,11 +27,11 @@
  */
 
 export const name = 'napcat-like'
-export const version = '2.0.0'
+export const version = '2.1.0'
 export const scope = 'both'
 export const displayName = 'NapCat 点赞助手'
 export const description =
-  '扩展 · NapCat 点赞：每日 00:00 自动赞列表、群内「赞我」指令（群等级门槛 / 回复文案可配）；并给 chat_send 扩展 qq / group 参数，可直接向指定 QQ 或群号发送消息。'
+  '扩展 · NapCat 点赞：每日 00:00 自动赞列表、群内「赞我」指令（群等级门槛 / 回复文案可配）；并给 chat_send 扩展 qq / group 参数，可直接向指定 QQ 或群号发送文本、图片、视频、语音与文件，无需目标已有渠道。'
 export const author = '念风扩展'
 export const icon = '👍'
 export const core = false
@@ -813,16 +813,101 @@ export function apply(ctx) {
     return { ok: true, targetType, targetId, instanceId: resolved.instanceId }
   }
 
+  const MEDIA_LIMIT = 4
+  const MEDIA_BUCKET = { image: 'images', video: 'videos', file: 'files', audio: 'audios' }
+
+  /** 将模型给的字符串 / 对象统一成 { type, source, name, mime }。 */
+  function normalizeMediaItem(raw, fallbackKind = 'image') {
+    const item = typeof raw === 'string' ? { file: raw } : raw && typeof raw === 'object' ? raw : null
+    if (!item) return null
+    const rawType = String(item.type || item.kind || fallbackKind || 'image').toLowerCase()
+    const type = rawType === 'record' || rawType === 'voice' ? 'audio' : MEDIA_BUCKET[rawType] ? rawType : 'image'
+    const source = String(item.url || item.data_url || item.dataUrl || item.file || item.path || item.base64 || item.image_url || '').trim()
+    if (!source) return null
+    return {
+      type,
+      source,
+      name: String(item.name || item.filename || item.file_name || item.fileName || '').trim().slice(0, 120),
+      mime: String(item.mime || item.content_type || item.contentType || '').trim(),
+    }
+  }
+
+  function normalizeMediaList(value, fallbackKind = 'image') {
+    const rawList = Array.isArray(value) ? value : value === undefined || value === null || value === '' ? [] : [value]
+    const out = []
+    for (const raw of rawList) {
+      const media = normalizeMediaItem(raw, fallbackKind)
+      if (!media) continue
+      out.push(media)
+      if (out.length >= MEDIA_LIMIT) break
+    }
+    return out
+  }
+
+  /** 从一条消息参数里收集 images / videos / files / audios / attachments。 */
+  function collectDirectMedia(input = {}) {
+    const buckets = { images: [], videos: [], files: [], audios: [] }
+    const add = list => {
+      for (const media of list) {
+        const key = MEDIA_BUCKET[media.type] || 'files'
+        if (buckets[key].length < MEDIA_LIMIT) buckets[key].push(media)
+      }
+    }
+    add(normalizeMediaList(input.images ?? input.image, 'image'))
+    add(normalizeMediaList(input.videos ?? input.video, 'video'))
+    add(normalizeMediaList(input.files ?? input.file, 'file'))
+    add(normalizeMediaList(input.audios ?? input.audio ?? input.voices ?? input.voice, 'audio'))
+    add(normalizeMediaList(input.attachments ?? input.attachment ?? input.media, ''))
+    return buckets
+  }
+
+  function directMediaCount(media = {}) {
+    return (media.images?.length || 0) + (media.videos?.length || 0) + (media.files?.length || 0) + (media.audios?.length || 0)
+  }
+
   function normalizeImages(value) {
-    const list = Array.isArray(value) ? value : value === undefined || value === null || value === '' ? [] : [value]
-    return list
-      .map(item => {
-        if (typeof item === 'string') return item.trim()
-        if (item && typeof item === 'object') return String(item.url || item.image_url || item.file || '').trim()
-        return ''
-      })
-      .filter(Boolean)
-      .slice(0, 4)
+    return normalizeMediaList(value, 'image').map(item => item.source)
+  }
+
+  /** 把媒体对象转成 OneBot 可直接发送的 file 值（data URL -> base64://）。 */
+  function mediaFileOf(media) {
+    const source = String(media?.source || '').trim()
+    if (!source) return ''
+    if (/^data:/i.test(source)) {
+      const match = source.match(/^data:([^;,]+)?(;base64)?,([\s\S]*)$/)
+      if (!match) return ''
+      const BufferImpl = globalThis.Buffer
+      const base64 = match[2]
+        ? match[3].replace(/\s+/g, '')
+        : BufferImpl
+          ? BufferImpl.from(decodeURIComponent(match[3]), 'utf8').toString('base64')
+          : ''
+      return base64 ? `base64://${base64}` : ''
+    }
+    return source
+  }
+
+  /** 无 napcat 服务时的兜底：媒体对象 -> OneBot segment。 */
+  function mediaToSegments(media = {}) {
+    const segments = []
+    for (const image of media.images || []) {
+      const file = mediaFileOf(image)
+      if (file && /^(https?:|base64:\/\/|data:image\/)/i.test(file)) segments.push({ type: 'image', data: { file } })
+    }
+    for (const video of media.videos || []) {
+      const file = mediaFileOf(video)
+      if (file) segments.push({ type: 'video', data: { file } })
+    }
+    for (const item of media.files || []) {
+      const file = mediaFileOf(item)
+      if (!file) continue
+      segments.push({ type: 'file', data: { file, ...(item.name ? { name: item.name } : {}) } })
+    }
+    for (const audio of media.audios || []) {
+      const file = mediaFileOf(audio)
+      if (file) segments.push({ type: 'record', data: { file } })
+    }
+    return segments
   }
 
   function normalizeDirectMessages(args = {}) {
@@ -832,31 +917,55 @@ export function apply(ctx) {
     for (const raw of rawList) {
       const item = typeof raw === 'string' ? { content: raw } : raw && typeof raw === 'object' ? raw : {}
       const content = String(item.content ?? item.text ?? '').replace(/[\u200B-\u200D\uFEFF]/g, '')
-      const images = normalizeImages(item.images)
+      const media = collectDirectMedia(item)
       if (typeof raw === 'string') {
         for (const part of raw.split(/\r?\n+/)) {
           const text = part.replace(/[\u200B-\u200D\uFEFF]/g, '').trim()
-          if (text) list.push({ content: text, images: [] })
+          if (text) list.push({ content: text, ...collectDirectMedia({}) })
         }
-      } else if (content.trim() || images.length) {
-        list.push({ content, images })
+      } else if (content.trim() || directMediaCount(media)) {
+        list.push({ content, ...media })
       }
     }
-    const topImages = normalizeImages(args.images ?? args.image)
-    if (topImages.length) {
-      if (list.length) list[0].images = [...list[0].images, ...topImages].slice(0, 4)
-      else list.push({ content: '', images: topImages })
+    // chat_send 的顶层媒体参数默认挂在最后一条消息上；没有 messages 时补一条空正文。
+    const topLevel = collectDirectMedia(args)
+    if (directMediaCount(topLevel)) {
+      if (!list.length) list.push({ content: '', ...collectDirectMedia({}) })
+      const last = list[list.length - 1]
+      const merged = {
+        content: last.content || '',
+        images: [...(last.images || []), ...topLevel.images].slice(0, MEDIA_LIMIT),
+        videos: [...(last.videos || []), ...topLevel.videos].slice(0, MEDIA_LIMIT),
+        files: [...(last.files || []), ...topLevel.files].slice(0, MEDIA_LIMIT),
+        audios: [...(last.audios || []), ...topLevel.audios].slice(0, MEDIA_LIMIT),
+      }
+      list[list.length - 1] = merged
     }
-    return list.filter(item => String(item.content || '').trim() || item.images.length)
+    return list.filter(item => String(item.content || '').trim() || directMediaCount(item))
   }
 
   async function sendOneToTarget(instanceId, targetType, targetId, item) {
     const text = String(item.content || '').replace(/[\u200B-\u200D\uFEFF]/g, '').trim()
-    const images = Array.isArray(item.images) ? item.images.slice(0, 4) : []
-    if (!text && !images.length) return { ok: false, code: 'EMPTY_MESSAGE', error: '消息内容为空。' }
+    const media = {
+      images: Array.isArray(item.images) ? item.images.slice(0, MEDIA_LIMIT) : [],
+      videos: Array.isArray(item.videos) ? item.videos.slice(0, MEDIA_LIMIT) : [],
+      files: Array.isArray(item.files) ? item.files.slice(0, MEDIA_LIMIT) : [],
+      audios: Array.isArray(item.audios) ? item.audios.slice(0, MEDIA_LIMIT) : [],
+    }
+    if (!text && !directMediaCount(media)) return { ok: false, code: 'EMPTY_MESSAGE', error: '消息内容为空。' }
     try {
       if (typeof napcat?.send === 'function') {
-        const result = await napcat.send({ instanceId, targetType, targetId, text, images })
+        // napcat 服务的 /send 已支持结构化视频 / 文件 / 语音；图片沿用原字符串 / 对象格式。
+        const result = await napcat.send({
+          instanceId,
+          targetType,
+          targetId,
+          text,
+          images: media.images.map(image => image.source),
+          videos: media.videos.map(video => video.source),
+          files: media.files.map(file => ({ file: file.source, ...(file.name ? { name: file.name } : {}), ...(file.mime ? { mime: file.mime } : {}) })),
+          audios: media.audios.map(audio => audio.source),
+        })
         if (!result || result.ok === false) {
           return {
             ok: false,
@@ -869,10 +978,8 @@ export function apply(ctx) {
       const action = targetType === 'group' ? 'send_group_msg' : 'send_private_msg'
       const segments = []
       if (text) segments.push({ type: 'text', data: { text } })
-      for (const image of images) {
-        if (/^(https?|data|base64):/i.test(image)) segments.push({ type: 'image', data: { file: image } })
-      }
-      if (!segments.length) return { ok: false, code: 'EMPTY_MESSAGE', error: '消息内容为空或不支持的图片格式。' }
+      segments.push(...mediaToSegments(media))
+      if (!segments.length) return { ok: false, code: 'EMPTY_MESSAGE', error: '消息内容为空或不支持的媒体格式。' }
       const params = targetType === 'group' ? { group_id: targetId, message: segments } : { user_id: targetId, message: segments }
       const result = await callOneBot(instanceId, action, params, { silent: true })
       if (!result.ok) return result
@@ -947,7 +1054,7 @@ export function apply(ctx) {
         }
       }
       const originalDescription = String(definition.description || '')
-      definition.description = `${originalDescription}\n【定向发送扩展】传入 qq 或 group 时，通过 NapCat 直接向指定 QQ / 群发送消息，不需要目标已有渠道；两个参数只能填一个。`
+      definition.description = `${originalDescription}\n【定向发送扩展】传入 qq 或 group 时，通过 NapCat 直接向指定 QQ / 群发送消息，不需要目标已有渠道；两个参数只能填一个。可同时传 images / videos / files / audios / attachments，支持发送图片、视频、语音与文件。`
       const originalHandler = record.handler
       record.handler = async (args = {}, context = {}) => {
         const request = parseDirectRequest(args)

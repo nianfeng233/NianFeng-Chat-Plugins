@@ -12,7 +12,7 @@
  */
 
 export const name = 'napcat-like-bridge'
-export const version = '2.0.0'
+export const version = '2.1.0'
 export const description = 'NapCat 点赞助手后端桥：多实例自动赞 / 「赞我」处理租约仲裁。'
 export const core = false
 export const inject = ['httpApi']
