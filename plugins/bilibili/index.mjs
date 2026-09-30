@@ -16,7 +16,7 @@ import { KIND_LABEL, previewText } from './lib/normalize.mjs'
 import { formatCommentTree } from './lib/comment-thread.mjs'
 
 export const name = 'bilibili'
-export const version = '1.7.0'
+export const version = '1.7.1'
 export const scope = 'both'
 export const displayName = '哔哩哔哩'
 export const description = 'B站渠道：扫码 / Edge 托管登录，私信与评论按对端 UID 统一入同一聊天记录库；消息中心（回复我 / @我 / 点赞 / 系统）收发，评论扫描与主动评论；UID 黑白名单与名单外处理策略。'
@@ -1804,7 +1804,7 @@ export function apply(ctx) {
           ? `风控冷却中（${data?.risk?.message || '请求被拦截'}），后续自动走浏览器兜底；冷却结束前减少操作。`
           : meta.lastError
             ? `最近错误：${meta.lastError}`
-            : '协议优先，命中风控 / 登录失效时自动切到该渠道独立的 Edge 浏览器执行；私信与评论各有一条独立发送队列。'
+            : '评论优先走该渠道独立 Edge 页面上下文，命中风控 / 浏览器不可用时自动回退协议；私信 / 点赞等写操作仍协议优先，各自有独立发送队列。'
       }
     }
 
@@ -1932,11 +1932,11 @@ export function apply(ctx) {
               <option value="off" ${draftView.browserFallback === false ? 'selected' : ''}>关闭</option>
             </select></label>
             <label class="bil-field"><span>发送方式</span><select data-bil-sendvia>
-              <option value="auto" ${draftView.sendVia !== 'browser' ? 'selected' : ''}>协议优先（风控时浏览器兜底）</option>
-              <option value="browser" ${draftView.sendVia === 'browser' ? 'selected' : ''}>浏览器优先（评论/互动更接近真人）</option>
+              <option value="auto" ${draftView.sendVia !== 'browser' ? 'selected' : ''}>智能（评论优先浏览器，其它协议优先）</option>
+              <option value="browser" ${draftView.sendVia === 'browser' ? 'selected' : ''}>全部浏览器优先（最接近真人）</option>
             </select></label>
           </div>
-          <div class="bil-note">如果评论经常「已提交但未公开可见」，把发送方式改为「浏览器优先」：评论、点赞、投币、收藏会通过该渠道独立 Edge 的页面上下文发出，请求特征与真人操作一致，被风控/折叠的概率更低。</div>
+          <div class="bil-note">评论属于公开发言，B站风控对它的影响最大：默认的「智能」模式会让评论优先通过该渠道独立 Edge 的页面上下文发出，降低被折叠 / 仅自己可见的概率；私信、点赞等仍走协议优先，浏览器不可用时自动回退。若全部写操作都想走浏览器，可切到「全部浏览器优先」。</div>
         </div>
 
         <div class="bil-section">

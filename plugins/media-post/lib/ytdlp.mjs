@@ -98,32 +98,36 @@ export async function download(tool, {
     } else {
       args.push('-f', `b[height<=${height}]/b`)
     }
+    // B站等站点默认可能优先 AV1；QQ 客户端普遍解不了 AV1，这里强制排序优先 H.264 + AAC。
+    args.push('-S', 'vcodec:h264,res,acodec:aac,br')
   }
 
   args.push('-o', outputTemplate, url)
   const result = await runYtDlp(tool, args, { timeoutMs, cwd: outDir, onProgress })
 
-  // 从 stdout 里找 yt-dlp 打印的最终文件路径；找不到就扫描输出目录里最新的 dl_ 文件。
+  // 从 stdout 里找 yt-dlp 打印的最终文件路径；失败时绝不再把目录里的 .part / 中间产物当成品。
   const lines = String(result.stdout || '').split('\n').map(line => line.trim()).filter(Boolean)
   let file = lines.reverse().find(line => /^[A-Za-z]:[\\/]|^\//.test(line) && !line.includes('merged into'))
+  if (file && /\.(part|ytdl|temp)$/i.test(file)) file = ''
   if (file) {
     const info = await stat(file).catch(() => null)
     if (!info?.isFile()) file = ''
   }
-  if (!file) {
+  if (!file && result.code === 0) {
     const entries = await readdir(outDir, { withFileTypes: true }).catch(() => [])
     const candidates = []
     for (const entry of entries) {
       if (!entry.isFile() || !entry.name.startsWith('dl_')) continue
+      if (/\.(part|ytdl|temp)$/i.test(entry.name)) continue
       const full = join(outDir, entry.name)
       const info = await stat(full).catch(() => null)
-      if (info?.isFile()) candidates.push({ full, mtime: info.mtimeMs })
+      if (info?.isFile() && info.size > 0) candidates.push({ full, mtime: info.mtimeMs })
     }
     candidates.sort((a, b) => b.mtime - a.mtime)
     file = candidates[0]?.full || ''
   }
 
-  if (result.code !== 0 && !file) {
+  if (result.code !== 0 || !file) {
     const detail = (result.stderr || result.error || result.stdout || '').trim().split('\n').slice(-3).join(' ')
     return { ok: false, error: detail.slice(0, 400) || 'yt-dlp 下载失败', raw: result }
   }

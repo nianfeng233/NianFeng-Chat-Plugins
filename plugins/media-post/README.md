@@ -93,5 +93,6 @@ powershell -ExecutionPolicy Bypass -File .\extensions\media-post\install.ps1 -Da
 | 群里发出来是链接 / 没有语音 | NapCat 渠道会**优先使用会话 meta 里的 `napcatInstanceId / napcatTargetType / napcatTargetId` 直发**；QQ 官方渠道使用会话 meta 里的 `qqbotChannelId` 调 qqbot 后端服务。meta 缺失时会回退到渠道表匹配。改完记得重新扫描 / 重启后端 |
 | NapCat 收不到语音 | 插件会先按 mp3 发 `record`，被 NapCat 拒绝时**自动转 amr 重试一次**（需要 ffmpeg）；仍失败时降级消息里会带 `未直发原因：<code> <error>`，把这段和 NapCat 日志发我即可继续定位 |
 | QQ 官方机器人收不到语音 | QQ 官方语音只接受 SILK；插件会用 ffmpeg 转 PCM → 内置 silk-wasm 编码。若返回 `FFMPEG_UNAVAILABLE` 就先去「设置 → 点歌台」安装 ffmpeg；若返回 `VOICE_FORMAT_INVALID` / `850019`，把 `media-post` 目录下的日志和 QQ 返回原文发来 |
+| QQ 里视频能收到但打开 0:00 / 黑屏 | 下载到的流是 QQ 播放器不支持的 **AV1 / H.265**（B站 `fnval=4048` 会返回 AV1）。修复版已改为只请求 DASH、优先 H.264 + AAC，并在发送前检查编码，必要时转码；清掉旧缓存后重发即可 |
 | 远程 NapCat 取不到文件 | 「默认行为 → 媒体直链地址」填 `http://<本机局域网IP>:8788`；本机 NapCat 留空即可 |
 | 非 NapCat / 非 QQ 官方渠道 | 会降级成标题 + 链接 + 本地路径；视频 / 文件 / 图文直发目前仍以 NapCat 为主 |

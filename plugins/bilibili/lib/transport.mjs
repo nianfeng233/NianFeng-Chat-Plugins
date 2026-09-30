@@ -4,6 +4,7 @@
  * 常态走 Node 协议请求；命中风控码、Cookie 失效或网络异常时，
  * 自动降级到「每渠道独立 Edge 的页面上下文」里执行同一个请求
  * （页面 origin 与官方页面一致，带上浏览器自己的 Cookie 与指纹）。
+ * 评论属于公开发言、风控影响最大，即使配置为 auto 也优先走浏览器；
  * 浏览器不可用时保持协议错误，不吞异常。
  */
 export function isNetworkError(err) {
@@ -138,6 +139,8 @@ export function createTransport({
 
   // 写操作：走浏览器页面上下文时更接近真人操作（TLS / 指纹 / 页面同源请求），
   // 对 B站的风控更友好，可显著降低评论被仅自己可见 / 折叠的概率。
+  // 评论属于公开发言，风险最高：即使配置是 auto（协议优先），commentAdd 也优先走浏览器；
+  // 私信 / 点赞 / 投币 / 收藏仍遵循 sendVia 配置（browser=全部浏览器优先，auto=协议优先）。
   const WRITE_METHODS = new Set(['dmSend', 'commentAdd', 'videoLike', 'videoCoin', 'videoFavorite'])
 
   const callViaBrowser = async (method, args, { settings = {}, fallbackError = null } = {}) => {
@@ -165,7 +168,10 @@ export function createTransport({
     if (typeof client[method] !== 'function') throw new Error(`未知的 B站接口方法：${method}`)
     const settings = settingsRef() || {}
     const browserAllowed = settings.browserFallback !== false
-    const preferBrowser = browserAllowed && settings.sendVia === 'browser' && WRITE_METHODS.has(method)
+    const preferBrowser =
+      browserAllowed &&
+      WRITE_METHODS.has(method) &&
+      (settings.sendVia === 'browser' || method === 'commentAdd')
     if (preferBrowser) {
       try {
         return await callViaBrowser(method, args, { settings })

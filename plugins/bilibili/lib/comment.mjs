@@ -236,8 +236,20 @@ export class CommentModule {
     if (!resolved?.oid) throw new Error(`没有识别出要评论的视频：${typeof target === 'object' ? JSON.stringify(target) : String(target || '')}`)
     const result = await this.queue.push(() => this.transport.call('commentAdd', [{ oid: resolved.oid, type: resolved.type || 1, message: text }]))
     const rpid = this.commentRpid(result)
-    if (rpid) this.logger?.info?.(`[bilibili] 评论已提交 rpid=${rpid}（视频 ${resolved.bvid || resolved.oid}）`)
-    return { ...(result && typeof result === 'object' ? result : {}), rpid }
+    let verified = null
+    if (rpid) {
+      verified = await this.verifyReply({ oid: resolved.oid, type: resolved.type || 1, root: '', rpid })
+      if (verified === true) {
+        this.logger?.info?.(`[bilibili] 评论已发布并公开可见 rpid=${rpid}（视频 ${resolved.bvid || resolved.oid}）`)
+      } else if (verified === false) {
+        this.logger?.warn?.(
+          `[bilibili] 评论 rpid=${rpid} 已提交，但未出现在公开评论列表：可能在审核 / 被折叠 / 仅自己可见（视频 ${resolved.bvid || resolved.oid}）`,
+        )
+      }
+    } else {
+      this.logger?.info?.(`[bilibili] 评论已提交，但接口未返回 rpid（视频 ${resolved.bvid || resolved.oid}）`)
+    }
+    return { ...(result && typeof result === 'object' ? result : {}), rpid, verified }
   }
 
   async reply(target, rpid, text, extra = {}) {

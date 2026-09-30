@@ -25,7 +25,7 @@ const { createStateStore, defaultAccountState } = await import(libUrl('store.mjs
 const { sleep } = await import(libUrl('util.mjs'))
 
 export const name = 'bilibili-bridge'
-export const version = '1.7.0'
+export const version = '1.7.1'
 export const displayName = '哔哩哔哩后端桥'
 export const description = 'B站渠道后端：协议 + Edge 兜底登录、私信 / 消息中心 / 评论收发与黑白名单所需数据通道。'
 export const core = false

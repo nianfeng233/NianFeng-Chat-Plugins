@@ -91,6 +91,35 @@ function qualityLabel(quality) {
 }
 
 /**
+ * 从 playurl 响应里挑选发 QQ 兼容性最好的音视频流（纯函数，方便单测）。
+ *   - 画质上限按「短边」计算：竖屏 720p 的 height 是 1280，按 height 过滤会被误伤成 360p；
+ *   - 优先 H.264（codecid=7）和 AAC：QQ / NapCat 客户端普遍不支持 AV1，选到 AV1
+ *     时视频能发出去但打开是黑屏 / 0:00。
+ */
+export function pickBilibiliStreams(playData = {}, { maxHeight = 720 } = {}) {
+  const audioSource = (playData.dash?.audio || []).slice()
+  const aacAudio = audioSource.filter(item => /(mp4a|aac)/i.test(String(item.codecs || '')))
+  const audioList = (aacAudio.length ? aacAudio : audioSource)
+    .sort((a, b) => (b.bandwidth || 0) - (a.bandwidth || 0))
+
+  const shortSide = item => {
+    const width = Number(item.width) || 0
+    const height = Number(item.height) || 0
+    if (width && height) return Math.min(width, height)
+    return height || width || Infinity
+  }
+  const heightLimit = Math.max(240, Math.min(2160, Number(maxHeight) || 720))
+  const allVideo = (playData.dash?.video || []).slice()
+  const withinLimit = allVideo.filter(item => shortSide(item) <= heightLimit)
+  const bounded = withinLimit.length ? withinLimit : allVideo
+  const avcVideo = bounded.filter(item => Number(item.codecid) === 7)
+  const videoList = (avcVideo.length ? avcVideo : bounded)
+    .sort((a, b) => shortSide(b) - shortSide(a) || (b.bandwidth || 0) - (a.bandwidth || 0))
+
+  return { audioList, videoList }
+}
+
+/**
  * 取 B站视频信息与可下载地址。
  * @param {{ url:string, cookieHeader?:string, maxHeight?:number, mode?:'video'|'audio' }} options
  */
@@ -102,18 +131,17 @@ export async function resolveBilibili({ url, cookieHeader = '', maxHeight = 720,
   if (!data?.cid) return { ok: false, error: `B站详情接口失败：${view?.message || '没有 cid'}` }
 
   const keys = await wbiKeys(cookieHeader)
+  // fnval=16 只请求 DASH：不再携带 AV1(2048) / 杜比 / HDR 标志。
+  // 之前 fnval=4048 会让 B站返回 AV1 流，QQ / NapCat 播放器大多解不了 AV1，
+  // 表现就是视频能收到、打开却是 0:00 / 黑屏无内容。
   const play = await getJson(
-    signedUrl('/x/player/wbi/playurl', { bvid: data.bvid, cid: data.cid, fnval: 4048, fourk: 1, fnver: 0, qn: 127, platform: 'pc' }, keys),
+    signedUrl('/x/player/wbi/playurl', { bvid: data.bvid, cid: data.cid, fnval: 16, fourk: 1, fnver: 0, qn: 127, platform: 'pc' }, keys),
     { cookieHeader },
   )
   const playData = play?.data
   if (!playData) return { ok: false, error: `B站取流失败：${play?.message || '没有 playurl 数据'}` }
 
-  const audioList = (playData.dash?.audio || []).slice().sort((a, b) => (b.bandwidth || 0) - (a.bandwidth || 0))
-  const videoList = (playData.dash?.video || [])
-    .filter(item => !maxHeight || Number(item.height) <= maxHeight)
-    .slice()
-    .sort((a, b) => (b.height || 0) - (a.height || 0) || (b.bandwidth || 0) - (a.bandwidth || 0))
+  const { audioList, videoList } = pickBilibiliStreams(playData, { maxHeight })
 
   const result = {
     ok: true,
@@ -123,8 +151,22 @@ export async function resolveBilibili({ url, cookieHeader = '', maxHeight = 720,
     duration: Number(data.duration) || 0,
     cover: String(data.pic || ''),
     url: `https://www.bilibili.com/video/${data.bvid}`,
-    audio: audioList.map(item => ({ id: String(item.id), bandwidth: Number(item.bandwidth) || 0, url: item.baseUrl || item.base_url || '' })),
-    video: videoList.map(item => ({ id: String(item.id), height: Number(item.height) || 0, label: qualityLabel(item.id), url: item.baseUrl || item.base_url || '' })),
+    audio: audioList.map(item => ({
+      id: String(item.id),
+      bandwidth: Number(item.bandwidth) || 0,
+      codecid: Number(item.codecid) || 0,
+      codecs: String(item.codecs || ''),
+      url: item.baseUrl || item.base_url || '',
+    })),
+    video: videoList.map(item => ({
+      id: String(item.id),
+      width: Number(item.width) || 0,
+      height: Number(item.height) || 0,
+      codecid: Number(item.codecid) || 0,
+      codecs: String(item.codecs || ''),
+      label: qualityLabel(item.id),
+      url: item.baseUrl || item.base_url || '',
+    })),
     durl: (playData.durl || []).map(item => ({ url: item.url || '', size: Number(item.size) || 0 })),
   }
   if (mode === 'audio' && !result.audio.length && result.durl.length) result.audio = result.durl.map(item => ({ id: 'durl', bandwidth: 0, url: item.url }))

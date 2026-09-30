@@ -40,7 +40,7 @@ import { downloadDirect, extractBvid, resolveBilibili } from './lib/bilibili.mjs
 import { encode as silkEncode, isSilk as isSilkBuffer } from './vendor/silk-wasm/lib/index.mjs'
 
 export const name = 'media-post-bridge'
-export const version = '2.2.0'
+export const version = '2.2.1'
 export const displayName = '点歌台后端桥'
 export const description = '媒体下载 / 转码 / 缓存与 NapCat 语音、QQ 官方机器人 SILK 语音、视频、文件发送'
 export const core = false
@@ -547,11 +547,34 @@ export function apply(ctx) {
         const v = await downloadDirect(video.url, dir, { cookieHeader, filename: `bili_${resolved.bvid}_v.m4s`, maxBytes: Math.max(1, Number(state.config.maxVideoMB) || 150) * 1024 * 1024 })
         const a = await downloadDirect(audio.url, dir, { cookieHeader, filename: `bili_${resolved.bvid}_a.m4s`, maxBytes: Math.max(1, Number(state.config.maxAudioMB) || 40) * 1024 * 1024 })
         const out = join(dir, `bili_${resolved.bvid}.mp4`)
-        const mux = await run(toolsInfo.ffmpeg.path, ['-hide_banner', '-loglevel', 'error', '-y', '-i', v.file, '-i', a.file, '-c', 'copy', out], { timeoutMs: 300000 })
-        if (mux.code === 0) {
+        const mux = await run(toolsInfo.ffmpeg.path, [
+          '-hide_banner', '-loglevel', 'error', '-y',
+          '-i', v.file, '-i', a.file,
+          '-map', '0:v:0', '-map', '1:a:0',
+          '-c', 'copy', '-movflags', '+faststart', out,
+        ], { timeoutMs: 300000 })
+        const compatible = Number(video.codecid) === 7 && /(mp4a|aac)/i.test(String(audio.codecs || ''))
+        if (mux.code === 0 && compatible) {
           const record = await saveDownloadedFile(out, { ...meta, kind: 'video', ext: 'mp4', mime: 'video/mp4' })
           return { ok: true, media: publicRecord(record) }
         }
+        // 选到的不是 AVC/AAC（QQ 客户端可能黑屏 / 0:00），或直接封装失败：
+        // 统一转码成兼容性最好的 H.264 + AAC 再发，宁可慢一点，也不发空视频。
+        const h264File = join(dir, `bili_${resolved.bvid}_h264.mp4`)
+        const transcode = await run(toolsInfo.ffmpeg.path, [
+          '-hide_banner', '-loglevel', 'error', '-y',
+          '-i', v.file, '-i', a.file,
+          '-map', '0:v:0', '-map', '1:a:0',
+          '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p',
+          '-c:a', 'aac', '-b:a', '128k',
+          '-movflags', '+faststart', h264File,
+        ], { timeoutMs: 600000 })
+        if (transcode.code === 0) {
+          const record = await saveDownloadedFile(h264File, { ...meta, kind: 'video', ext: 'mp4', mime: 'video/mp4', meta: { ...(meta.meta || {}), transcoded: 'h264-aac' } })
+          return { ok: true, media: publicRecord(record), transcoded: 'h264-aac' }
+        }
+        const detail = String(transcode.stderr || transcode.error || mux.stderr || mux.error || '').trim().slice(0, 300)
+        return fail('VIDEO_TRANSCODE_FAILED', `视频流既不能直接封装，也转码失败：${detail || '未知错误'}`, { hint: '可尝试更新 ffmpeg，或在设置里配置 yt-dlp 后重试。' })
       }
       return fail('NO_VIDEO_STREAM', '没有拿到可用的 B站视频流（可尝试安装 yt-dlp 或 ffmpeg 后重试）。')
     } finally {
