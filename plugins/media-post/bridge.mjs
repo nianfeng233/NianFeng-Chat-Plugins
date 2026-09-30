@@ -1197,7 +1197,7 @@ export function apply(ctx) {
   /* ------------------------------------------------------------------ */
 
   loadState()
-    .then(() => ctx.logger.info(`[media-post] 后端桥就绪 · 数据目录 ${dataDir()}`))
+    .then(() => ctx.logger.info(`[media-post] 后端桥就绪 v${version}${__revision ? ` · rev=${__revision}` : ''} · 数据目录 ${dataDir()}`))
     .catch(error => ctx.logger.warn(`[media-post] 状态加载失败：${error.message}`))
 
   ctx.effect(() => () => {
