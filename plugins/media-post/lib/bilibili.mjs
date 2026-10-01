@@ -91,12 +91,13 @@ function qualityLabel(quality) {
 }
 
 /**
- * 从 playurl 响应里挑选发 QQ 兼容性最好的音视频流（纯函数，方便单测）。
+ * 从 playurl 响应里挑选「浏览器原画质」的音视频流（纯函数，方便单测）。
  *   - 画质上限按「短边」计算：竖屏 720p 的 height 是 1280，按 height 过滤会被误伤成 360p；
- *   - 优先 H.264（codecid=7）和 AAC：QQ / NapCat 客户端普遍不支持 AV1，选到 AV1
- *     时视频能发出去但打开是黑屏 / 0:00。
+ *     maxHeight <= 0 表示不限制（= 网页播放器能拿到的最好画质）；
+ *   - 同一清晰度优先 H.264（codecid=7）与 AAC：QQ / NapCat 客户端普遍不支持 AV1 / HEVC，
+ *     真选到时交给 bridge 按需转成 H.264 再发，而不是牺牲清晰度。
  */
-export function pickBilibiliStreams(playData = {}, { maxHeight = 720 } = {}) {
+export function pickBilibiliStreams(playData = {}, { maxHeight = 0 } = {}) {
   const audioSource = (playData.dash?.audio || []).slice()
   const aacAudio = audioSource.filter(item => /(mp4a|aac)/i.test(String(item.codecs || '')))
   const audioList = (aacAudio.length ? aacAudio : audioSource)
@@ -108,22 +109,26 @@ export function pickBilibiliStreams(playData = {}, { maxHeight = 720 } = {}) {
     if (width && height) return Math.min(width, height)
     return height || width || Infinity
   }
-  const heightLimit = Math.max(240, Math.min(2160, Number(maxHeight) || 720))
+  const limit = Number(maxHeight) > 0 ? Math.max(240, Math.min(2160, Number(maxHeight))) : 0
   const allVideo = (playData.dash?.video || []).slice()
-  const withinLimit = allVideo.filter(item => shortSide(item) <= heightLimit)
-  const bounded = withinLimit.length ? withinLimit : allVideo
-  const avcVideo = bounded.filter(item => Number(item.codecid) === 7)
-  const videoList = (avcVideo.length ? avcVideo : bounded)
-    .sort((a, b) => shortSide(b) - shortSide(a) || (b.bandwidth || 0) - (a.bandwidth || 0))
+  const bounded = limit ? allVideo.filter(item => shortSide(item) <= limit) : allVideo
+  const codecRank = item => (Number(item.codecid) === 7 ? 0 : Number(item.codecid) === 12 ? 1 : 2)
+  const videoList = (bounded.length ? bounded : allVideo)
+    .sort((a, b) => shortSide(b) - shortSide(a) || codecRank(a) - codecRank(b) || (b.bandwidth || 0) - (a.bandwidth || 0))
 
   return { audioList, videoList }
+}
+
+const backupUrls = item => {
+  const list = item?.backupUrl || item?.backup_url || []
+  return (Array.isArray(list) ? list : []).map(url => String(url || '')).filter(url => /^https?:\/\//i.test(url))
 }
 
 /**
  * 取 B站视频信息与可下载地址。
  * @param {{ url:string, cookieHeader?:string, maxHeight?:number, mode?:'video'|'audio' }} options
  */
-export async function resolveBilibili({ url, cookieHeader = '', maxHeight = 720, mode = 'video' } = {}) {
+export async function resolveBilibili({ url, cookieHeader = '', maxHeight = 0, mode = 'video' } = {}) {
   const resolved = await resolveShort(String(url || ''), cookieHeader)
   if (!resolved.bvid) return { ok: false, error: '没能从链接里解析出 B站 BV 号' }
   const view = await getJson(`https://api.bilibili.com/x/web-interface/view?bvid=${encodeURIComponent(resolved.bvid)}`, { cookieHeader })
@@ -131,11 +136,10 @@ export async function resolveBilibili({ url, cookieHeader = '', maxHeight = 720,
   if (!data?.cid) return { ok: false, error: `B站详情接口失败：${view?.message || '没有 cid'}` }
 
   const keys = await wbiKeys(cookieHeader)
-  // fnval=16 只请求 DASH：不再携带 AV1(2048) / 杜比 / HDR 标志。
-  // 之前 fnval=4048 会让 B站返回 AV1 流，QQ / NapCat 播放器大多解不了 AV1，
-  // 表现就是视频能收到、打开却是 0:00 / 黑屏无内容。
+  // fnval=4048 就是网页播放器请求的那一套（DASH + AV1 / HDR / 杜比都要），
+  // 这样能拿到和浏览器里一模一样的原画质；能不能播交给后面的编码探测与按需转码。
   const play = await getJson(
-    signedUrl('/x/player/wbi/playurl', { bvid: data.bvid, cid: data.cid, fnval: 16, fourk: 1, fnver: 0, qn: 127, platform: 'pc' }, keys),
+    signedUrl('/x/player/wbi/playurl', { bvid: data.bvid, cid: data.cid, fnval: 4048, fourk: 1, fnver: 0, qn: 127, platform: 'pc' }, keys),
     { cookieHeader },
   )
   const playData = play?.data
@@ -157,6 +161,7 @@ export async function resolveBilibili({ url, cookieHeader = '', maxHeight = 720,
       codecid: Number(item.codecid) || 0,
       codecs: String(item.codecs || ''),
       url: item.baseUrl || item.base_url || '',
+      backup: backupUrls(item),
     })),
     video: videoList.map(item => ({
       id: String(item.id),
@@ -165,16 +170,33 @@ export async function resolveBilibili({ url, cookieHeader = '', maxHeight = 720,
       codecid: Number(item.codecid) || 0,
       codecs: String(item.codecs || ''),
       label: qualityLabel(item.id),
+      bandwidth: Number(item.bandwidth) || 0,
       url: item.baseUrl || item.base_url || '',
+      backup: backupUrls(item),
     })),
-    durl: (playData.durl || []).map(item => ({ url: item.url || '', size: Number(item.size) || 0 })),
+    durl: (playData.durl || []).map(item => ({ url: item.url || '', size: Number(item.size) || 0, backup: backupUrls(item) })),
   }
-  if (mode === 'audio' && !result.audio.length && result.durl.length) result.audio = result.durl.map(item => ({ id: 'durl', bandwidth: 0, url: item.url }))
+  if (mode === 'audio' && !result.audio.length && result.durl.length) {
+    result.audio = result.durl.map(item => ({ id: 'durl', bandwidth: 0, url: item.url, backup: item.backup || [] }))
+  }
   return result
 }
 
-/** 下载一个直链到 outDir，返回本地路径。 */
-export async function downloadDirect(url, outDir, { cookieHeader = '', headers = {}, filename = '', maxBytes = 512 * 1024 * 1024, onProgress } = {}) {
+/** 下载一个直链到 outDir，返回本地路径；主地址失败时自动尝试 B站备用 CDN。 */
+export async function downloadDirect(url, outDir, { cookieHeader = '', headers = {}, filename = '', maxBytes = 512 * 1024 * 1024, backup = [], onProgress } = {}) {
+  const candidates = [url, ...(Array.isArray(backup) ? backup : [])].map(item => String(item || '')).filter(Boolean)
+  let lastError = null
+  for (const candidate of candidates) {
+    try {
+      return await downloadOne(candidate, outDir, { cookieHeader, headers, filename, maxBytes, onProgress })
+    } catch (error) {
+      lastError = error
+    }
+  }
+  throw lastError || new Error('没有可用的下载地址')
+}
+
+async function downloadOne(url, outDir, { cookieHeader = '', headers = {}, filename = '', maxBytes = 512 * 1024 * 1024, onProgress } = {}) {
   await mkdir(outDir, { recursive: true })
   const response = await fetch(url, {
     headers: { 'User-Agent': UA, Referer: 'https://www.bilibili.com/', ...(cookieHeader ? { Cookie: cookieHeader } : {}), ...headers },

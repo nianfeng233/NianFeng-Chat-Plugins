@@ -184,18 +184,26 @@ export function renderMediaPanel(container, services = {}) {
   const behaviorHtml = () => {
     const config = status?.config || {}
     const voice = formState.voiceFormat || config.voiceFormat || 'mp3'
-    const maxHeight = Number(formState.maxHeight || config.maxHeight) || 720
+    const quality = String(formState.videoQuality || config.videoQuality || 'best')
+    const transcodeCap = String(formState.transcodeMaxHeight ?? config.transcodeMaxHeight ?? 1080)
+    const qualityNote = status?.qualityLabel ? `当前：${escapeHtml(status.qualityLabel)}` : ''
     return `<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
       <select class="setting-input" data-field="voiceFormat" style="width:auto">
         <option value="mp3" ${voice === 'amr' ? '' : 'selected'}>mp3（兼容性最好）</option>
         <option value="amr" ${voice === 'amr' ? 'selected' : ''}>amr（更小，更像 QQ 语音）</option>
       </select>
-      <select class="setting-input" data-field="maxHeight" style="width:auto">
-        ${[360, 480, 720, 1080].map(height => `<option value="${height}" ${maxHeight === height ? 'selected' : ''}>视频 ${height}P</option>`).join('')}
+      <select class="setting-input" data-field="videoQuality" style="width:auto" title="视频下载画质">
+        <option value="best" ${quality === 'best' ? 'selected' : ''}>原画质（推荐 · 浏览器同款无水印流）</option>
+        ${[2160, 1440, 1080, 720, 480, 360].map(height => `<option value="${height}" ${quality === String(height) ? 'selected' : ''}>最高 ${height}P</option>`).join('')}
       </select>
-      <input class="setting-input" data-field="maxVideoMB" style="width:80px" value="${escapeHtml(formState.maxVideoMB ?? config.maxVideoMB ?? 150)}" title="单视频上限(MB)" />
+      <select class="setting-input" data-field="transcodeMaxHeight" style="width:auto" title="QQ 不支持的编码转码时保留的最高清晰度">
+        <option value="0" ${transcodeCap === '0' ? 'selected' : ''}>转码不降级</option>
+        ${[1080, 720].map(height => `<option value="${height}" ${transcodeCap === String(height) ? 'selected' : ''}>转码保留 ${height}P</option>`).join('')}
+      </select>
+      <input class="setting-input" data-field="maxVideoMB" style="width:80px" value="${escapeHtml(formState.maxVideoMB ?? config.maxVideoMB ?? 300)}" title="单视频上限(MB)" />
       <span style="font-size:12px;color:var(--text-4)">MB</span>
     </div>
+    <div class="mp-note">视频默认「原画质」：B站请求网页播放器同款 DASH，抖音只取 play_addr（无水印）；如果拿到的是 AV1 / HEVC 等 QQ 播放器不支持的编码，会自动转成 H.264 + AAC 再发。${qualityNote}</div>
     <div class="mp-note">NapCat 使用上面的语音格式；QQ 官方机器人会自动用 ffmpeg + silk-wasm 转 SILK，不受此选项影响。</div>
     <div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
       <input class="setting-input" data-field="fileBaseUrl" style="min-width:260px;flex:1" placeholder="媒体直链地址：远程 NapCat 时填 http://局域网IP:8788，本机留空" value="${escapeHtml(formState.fileBaseUrl ?? config.fileBaseUrl ?? '')}" />
@@ -233,7 +241,7 @@ export function renderMediaPanel(container, services = {}) {
   }
 
   const captureForm = () => {
-    for (const field of ['voiceFormat', 'maxHeight', 'maxVideoMB', 'fileBaseUrl', 'keep', 'maxBytes', 'ttlDays', 'test-url', 'test-kind']) {
+    for (const field of ['voiceFormat', 'videoQuality', 'transcodeMaxHeight', 'maxVideoMB', 'fileBaseUrl', 'keep', 'maxBytes', 'ttlDays', 'test-url', 'test-kind']) {
       const element = container.querySelector(`[data-field="${field}"]`)
       if (element) formState[field] = element.value
     }
@@ -324,11 +332,12 @@ export function renderMediaPanel(container, services = {}) {
     }, '同步 Cookie'))
     container.querySelector('[data-action="save-config"]')?.addEventListener('click', () => {
       const value = field => container.querySelector(`[data-field="${field}"]`)?.value
-      for (const field of ['voiceFormat', 'maxHeight', 'maxVideoMB', 'fileBaseUrl', 'keep', 'maxBytes', 'ttlDays']) formState[field] = value(field)
+      for (const field of ['voiceFormat', 'videoQuality', 'transcodeMaxHeight', 'maxVideoMB', 'fileBaseUrl', 'keep', 'maxBytes', 'ttlDays']) formState[field] = value(field)
       const payload = {
         voiceFormat: formState.voiceFormat,
-        maxHeight: Number(formState.maxHeight) || 720,
-        maxVideoMB: Number(formState.maxVideoMB) || 150,
+        videoQuality: formState.videoQuality || 'best',
+        transcodeMaxHeight: Number(formState.transcodeMaxHeight) || 0,
+        maxVideoMB: Number(formState.maxVideoMB) || 300,
         fileBaseUrl: String(formState.fileBaseUrl || '').trim(),
         keep: Number(formState.keep) || 200,
         maxBytes: Math.max(1, Number(formState.maxBytes) || 2) * 1024 * 1024 * 1024,
@@ -359,7 +368,10 @@ export function renderMediaPanel(container, services = {}) {
         const media = result.media || {}
         const title = media.title || (media.items?.[0]?.title ?? '')
         const size = media.size || (media.items || []).reduce((sum, item) => sum + (Number(item.size) || 0), 0)
-        testResult = `<span class="mp-note ok">下载完成：${escapeHtml(title || media.file || media.id || '')} · ${bytes(size)}${media.duration ? ' · ' + duration(media.duration) : ''}</span>`
+        const quality = result.quality || media.meta?.quality || ''
+        const watermark = result.watermarkFree ?? media.meta?.watermarkFree
+        const flags = [quality, watermark ? '无水印' : '', result.transcoded ? `已转码 ${result.transcoded}` : ''].filter(Boolean).join(' · ')
+        testResult = `<span class="mp-note ok">下载完成：${escapeHtml(title || media.file || media.id || '')} · ${bytes(size)}${media.duration ? ' · ' + duration(media.duration) : ''}${flags ? ' · ' + escapeHtml(flags) : ''}</span>`
       }, '解析下载')
     })
     for (const button of container.querySelectorAll('[data-action="delete-media"]')) {

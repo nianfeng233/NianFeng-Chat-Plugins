@@ -39,12 +39,13 @@ const bridgeVendorUrl = file => {
   const clean = String(file).replace(/^\.\//, '')
   return new URL(`./vendor/${clean}${__revision ? `?v=${encodeURIComponent(__revision)}` : ''}`, import.meta.url).href
 }
-const [store, tools, ytdlp, ffmpeg, bilibili, silk] = await Promise.all([
+const [store, tools, ytdlp, ffmpeg, bilibili, douyinLib, silk] = await Promise.all([
   import(bridgeLibUrl('store.mjs')),
   import(bridgeLibUrl('tools.mjs')),
   import(bridgeLibUrl('ytdlp.mjs')),
   import(bridgeLibUrl('ffmpeg.mjs')),
   import(bridgeLibUrl('bilibili.mjs')),
+  import(bridgeLibUrl('douyin.mjs')),
   import(bridgeVendorUrl('silk-wasm/lib/index.mjs')),
 ])
 const {
@@ -61,12 +62,13 @@ const {
 } = store
 const { installFfmpeg, installYtDlp, run, toolStatus } = tools
 const { download: ytdlpDownload } = ytdlp
-const { transcodeAudio } = ffmpeg
+const { isQqCompatibleVideo, probeMedia, remuxVideo, transcodeAudio, transcodeVideoH264 } = ffmpeg
 const { downloadDirect, extractBvid, resolveBilibili } = bilibili
+const { pickDouyinStreams } = douyinLib
 const { encode: silkEncode, isSilk: isSilkBuffer } = silk
 
 export const name = 'media-post-bridge'
-export const version = '2.2.2'
+export const version = '2.3.0'
 export const displayName = '点歌台后端桥'
 export const description = '媒体下载 / 转码 / 缓存与 NapCat 语音、QQ 官方机器人 SILK 语音、视频、文件发送'
 export const core = false
@@ -76,8 +78,9 @@ export const provides = [{ name: 'media-post', type: 'singleton' }]
 const DEFAULT_CONFIG = {
   voiceFormat: 'mp3', // mp3 | amr
   mp3Bitrate: '96k',
-  maxHeight: 720,
-  maxVideoMB: 150,
+  videoQuality: 'best', // best = 原画质（不限制）| 2160 | 1080 | 720 | 480 | 360
+  transcodeMaxHeight: 1080, // 遇到 AV1 / HEVC 需要转码时保留的最高高度（0 = 不降级）
+  maxVideoMB: 300,
   maxAudioMB: 40,
   maxImageMB: 15,
   maxImages: 9,
@@ -93,6 +96,11 @@ const DEFAULT_CONFIG = {
 }
 
 const PLATFORM_LABEL = { bilibili: 'B站', douyin: '抖音' }
+// 旧版本的画质选项（maxHeight）默认 720；升级后默认改成原画质，只迁移用户手动改过的值。
+const LEGACY_DEFAULT_HEIGHT = 720
+
+const QUALITY_LABEL = { best: '原画质', 2160: '4K', 1440: '2K', 1080: '1080P', 720: '720P', 480: '480P', 360: '360P' }
+const qualityLabelOf = value => QUALITY_LABEL[String(value ?? '').trim().toLowerCase()] || '原画质'
 
 const fail = (code, error, extra = {}) => ({ ok: false, code, error, ...extra })
 const trimSlash = value => String(value || '').replace(/\/+$/, '')
@@ -148,15 +156,38 @@ export function apply(ctx) {
   const loadState = async () => {
     try {
       const raw = JSON.parse(await readFile(statePath(), 'utf8'))
+      const merged = { ...DEFAULT_CONFIG, ...(raw?.config || {}) }
+      // v2.3.0 之前用 maxHeight 表示画质（默认 720）。升级后默认「原画质」：
+      // 只有在用户手动改过 maxHeight 时才迁移成 videoQuality，保留用户的选择。
+      if (raw?.config && raw.config.videoQuality === undefined) {
+        const legacy = Number(raw.config.maxHeight)
+        if (Number.isFinite(legacy) && legacy > 0 && legacy !== LEGACY_DEFAULT_HEIGHT) merged.videoQuality = String(legacy)
+      }
+      delete merged.maxHeight
       state = {
         version: 1,
-        config: { ...DEFAULT_CONFIG, ...(raw?.config || {}) },
+        config: merged,
         cookies: raw?.cookies && typeof raw.cookies === 'object' ? raw.cookies : {},
       }
     } catch (_) {
       state = { version: 1, config: { ...DEFAULT_CONFIG }, cookies: {} }
     }
     readyResolve?.()
+  }
+
+  /** 画质上限：0 = 不限制（浏览器原画质）。 */
+  const qualityCap = () => {
+    const value = String(state.config.videoQuality ?? 'best').trim().toLowerCase()
+    if (!value || value === 'best' || value === 'max' || value === '0') return 0
+    const height = Number(value)
+    return Number.isFinite(height) && height > 0 ? Math.max(240, Math.min(2160, Math.round(height))) : 0
+  }
+  const currentQuality = () => (qualityCap() || 'best')
+  const videoBytesLimit = () => Math.max(1, Number(state.config.maxVideoMB) || DEFAULT_CONFIG.maxVideoMB) * 1024 * 1024
+  const transcodeCap = () => {
+    const value = Number(state.config.transcodeMaxHeight)
+    if (!Number.isFinite(value) || value <= 0) return 0
+    return Math.max(240, Math.min(2160, Math.round(value)))
   }
 
   const serviceOf = name => {
@@ -370,11 +401,11 @@ export function apply(ctx) {
   }
 
   /** 直链下载到媒体库（抖音 / B站原生兜底共用）。 */
-  const directDownloadToStore = async (url, { headers = {}, kind, meta = {}, maxBytes } = {}) => {
+  const directDownloadToStore = async (url, { headers = {}, kind, meta = {}, maxBytes, backup = [] } = {}) => {
     const dir = await ensureTmp()
     try {
       const name = `${kind || 'file'}_${Date.now().toString(36)}`
-      const downloaded = await downloadDirect(url, dir, { headers, filename: name, maxBytes: maxBytes || state.config.maxVideoMB * 1024 * 1024 })
+      const downloaded = await downloadDirect(url, dir, { headers, filename: name, backup, maxBytes: maxBytes || videoBytesLimit() })
       return await saveDownloadedFile(downloaded.file, { ...meta, kind: kind || 'file' })
     } finally {
       await cleanupTmp(dir)
@@ -390,19 +421,62 @@ export function apply(ctx) {
     }
   }
 
-  /** 抖音没有 yt-dlp 时，从 bit_rate 清晰度列表里挑一个 ≤maxHeight 的直链。 */
-  const pickDouyinStream = (detail, maxHeight) => {
-    const height = Math.max(240, Number(maxHeight) || 720)
-    const qualities = (detail?.video?.qualities || []).filter(item => item?.url)
-    const fit = qualities
-      .filter(item => !item.height || item.height <= height)
-      .sort((a, b) => (b.height || 0) - (a.height || 0) || (b.bitrate || 0) - (a.bitrate || 0))
-    if (fit[0]?.url) return fit[0].url
-    const smallest = qualities.slice().sort((a, b) => (a.bitrate || 0) - (b.bitrate || 0))
-    return smallest[0]?.url || detail?.video?.download_url_list?.[0] || detail?.video?.url || ''
+  /**
+   * 编码探测 + 兼容性兜底：H.264 + AAC 直接发；AV1 / HEVC 等由 ffmpeg 转码成
+   * H.264 + AAC，避免「视频发出去打开 0:00 / 黑屏」。转码高度受 transcodeMaxHeight 限制。
+   * @returns {{ record:object, probe:object|null, transcoded:string, error?:string }}
+   */
+  const ensureCompatVideo = async (record, toolsInfo, { dropSource = false } = {}) => {
+    if (!record?.file) return { record, probe: null, transcoded: '' }
+    if (!toolsInfo?.ffmpeg?.available) return { record, probe: null, transcoded: '' }
+    const input = join(dataDir(), 'media-post', 'media', record.file)
+    const probe = await probeMedia(toolsInfo.ffmpeg.path, input)
+    if (!probe.ok) return { record, probe, transcoded: '' }
+    if (isQqCompatibleVideo(probe)) {
+      const patched = await patchRecord(dataDir(), record.id, {
+        duration: record.duration || probe.duration || 0,
+        meta: { ...(record.meta || {}), vcodec: probe.vcodec, acodec: probe.acodec },
+      })
+      return { record: patched || record, probe, transcoded: '' }
+    }
+    const dir = await ensureTmp()
+    try {
+      const output = join(dir, `${record.id}_h264.mp4`)
+      const limit = transcodeCap()
+      const converted = await transcodeVideoH264(toolsInfo.ffmpeg.path, input, output, { maxHeight: limit })
+      if (!converted.ok) {
+        ctx.logger.warn(`[media-post] ${probe.vcodec} 转码 H.264 失败，按原样发送：${converted.error || ''}`)
+        return { record, probe, transcoded: '', error: converted.error }
+      }
+      const saved = await saveDownloadedFile(output, {
+        kind: 'video',
+        ext: 'mp4',
+        mime: 'video/mp4',
+        title: record.title,
+        author: record.author,
+        duration: record.duration || probe.duration || 0,
+        source: record.source,
+        platformId: record.platformId,
+        sourceUrl: record.sourceUrl,
+        cover: record.cover,
+        meta: {
+          ...(record.meta || {}),
+          vcodec: 'h264',
+          acodec: 'aac',
+          transcodedFrom: probe.vcodec,
+          transcoded: `由 ${probe.vcodec || '未知编码'} 转成 H.264${limit ? ` / 最高 ${limit}P` : ''}`,
+        },
+      })
+      if (dropSource) await removeRecord(dataDir(), record.id).catch(() => {})
+      return { record: saved, probe, transcoded: `h264${limit ? `@${limit}P` : ''}`, from: probe.vcodec }
+    } finally {
+      await cleanupTmp(dir)
+    }
   }
 
   const prepareDouyin = async ({ url, kind, detail, toolsInfo, cookiePath, userAgent }) => {
+    // kind=auto 时按内容类型落地：图文 → 图片，其余 → 视频（旧版 auto + 视频会误走音频分支）。
+    const effectiveKind = kind === 'auto' ? (detail.kind === 'note' ? 'images' : 'video') : kind
     const meta = {
       source: 'douyin',
       platformId: detail.id,
@@ -413,23 +487,64 @@ export function apply(ctx) {
       cover: detail.video?.cover || detail.images?.[0]?.url || '',
     }
 
-    if (kind === 'images' || (kind === 'auto' && detail.kind === 'note')) {
+    if (effectiveKind === 'images') {
       const list = (detail.images || []).slice(0, Math.max(1, Math.min(18, Number(state.config.maxImages) || 9)))
       if (!list.length) return fail('NO_IMAGES', '这条抖音内容里没有解析到图片。')
       const records = []
       for (const image of list) {
-        const record = await directDownloadToStore(image.url, {
-          headers: await douyinHeaders(userAgent),
-          kind: 'image',
-          meta: { ...meta, kind: 'image', ext: 'jpg', mime: 'image/jpeg', duration: 0, meta: { index: image.index } },
-          maxBytes: Math.max(1, Number(state.config.maxImageMB) || 15) * 1024 * 1024,
-        })
-        records.push(record)
+        try {
+          const record = await directDownloadToStore(image.url, {
+            headers: await douyinHeaders(userAgent),
+            kind: 'image',
+            meta: { ...meta, kind: 'image', ext: 'jpg', mime: 'image/jpeg', duration: 0, meta: { index: image.index } },
+            maxBytes: Math.max(1, Number(state.config.maxImageMB) || 15) * 1024 * 1024,
+          })
+          records.push(record)
+        } catch (error) {
+          ctx.logger.warn(`[media-post] 抖音图文第 ${Number(image.index || 0) + 1} 张下载失败：${error?.message || error}`)
+        }
       }
+      if (!records.length) return fail('DOWNLOAD_FAILED', '抖音图文的图片都没下载成功，可能需要重新登录抖音后重试。')
       return { ok: true, media: { kind: 'images', items: records.map(publicRecord), title: meta.title, author: meta.author, source: 'douyin', sourceUrl: meta.sourceUrl } }
     }
 
-    if (kind === 'video') {
+    if (effectiveKind === 'video') {
+      // 直链优先：play_addr 系列就是网页播放器在播的「无水印」流，画质和浏览器一致。
+      // 详情接口返回的 download_addr（带水印）永远不碰。
+      const candidates = pickDouyinStreams(detail, { maxHeight: qualityCap() })
+      if (!candidates.length) {
+        return fail('NO_VIDEO_URL', '没有从抖音解析到可用的无水印视频地址。', { hint: '请到「设置 → 点歌台」点「登录抖音」并同步 Cookie 后重试。' })
+      }
+      const failures = []
+      // 抖音自己标记 has_watermark=true 时（少数下载型内容）如实上报，不假装无水印。
+      const watermarkFree = detail.video?.has_watermark !== true
+      for (const candidate of candidates.slice(0, 3)) {
+        try {
+          const record = await directDownloadToStore(candidate.url, {
+            headers: await douyinHeaders(userAgent),
+            kind: 'video',
+            meta: {
+              ...meta,
+              kind: 'video',
+              ext: 'mp4',
+              mime: 'video/mp4',
+              meta: { quality: candidate.label, watermarkFree },
+            },
+            maxBytes: videoBytesLimit(),
+          })
+          const compat = await ensureCompatVideo(record, toolsInfo, { dropSource: true })
+          return {
+            ok: true,
+            media: publicRecord(compat.record),
+            quality: candidate.label,
+            watermarkFree,
+            transcoded: compat.transcoded || '',
+          }
+        } catch (error) {
+          failures.push(`${candidate.label}：${error?.message || error}`)
+        }
+      }
+
       if (toolsInfo.ytdlp.available) {
         const dir = await ensureTmp()
         try {
@@ -438,30 +553,33 @@ export function apply(ctx) {
             mode: 'video',
             outDir: dir,
             cookiesPath: cookiePath,
-            userAgent: userAgent || '', 
+            userAgent: userAgent || '',
             referer: 'https://www.douyin.com/',
-            maxHeight: state.config.maxHeight,
+            maxHeight: qualityCap(),
             ffmpegPath: toolsInfo.ffmpeg.available ? toolsInfo.ffmpeg.path : '',
           })
           if (!result.ok) return fail('DOWNLOAD_FAILED', result.error || 'yt-dlp 下载失败')
-          const record = await saveDownloadedFile(result.file, { ...meta, kind: 'video', ext: 'mp4', mime: 'video/mp4' })
-          return { ok: true, media: publicRecord(record) }
+          const record = await saveDownloadedFile(result.file, {
+            ...meta,
+            title: result.meta?.title || meta.title,
+            author: result.meta?.author || meta.author,
+            duration: result.meta?.duration || meta.duration,
+            kind: 'video',
+            ext: 'mp4',
+            mime: 'video/mp4',
+            meta: { quality: '自动（yt-dlp）', watermarkFree: null },
+          })
+          const compat = await ensureCompatVideo(record, toolsInfo, { dropSource: true })
+          return { ok: true, media: publicRecord(compat.record), quality: '自动（yt-dlp）', watermarkFree: null, transcoded: compat.transcoded || '' }
         } finally {
           await cleanupTmp(dir)
         }
       }
-      const direct = pickDouyinStream(detail, state.config.maxHeight)
-      if (!direct) return fail('NO_VIDEO_URL', '没有从抖音解析到可下载的视频地址。')
-      const record = await directDownloadToStore(direct, {
-        headers: await douyinHeaders(userAgent),
-        kind: 'video',
-        meta: { ...meta, kind: 'video', ext: 'mp4', mime: 'video/mp4' },
-        maxBytes: Math.max(1, Number(state.config.maxVideoMB) || 150) * 1024 * 1024,
-      })
-      return { ok: true, media: publicRecord(record) }
+      const detailText = failures.slice(-2).join('；') || '没有解析到可用的无水印直链'
+      return fail('DOWNLOAD_FAILED', `抖音视频下载失败：${detailText}`, { hint: '请在「设置 → 点歌台」点「登录抖音」并同步 Cookie 后重试；也可以在设置里安装 yt-dlp 作为备用下载器。' })
     }
 
-    // kind === audio
+    // effectiveKind === 'audio'
     if (toolsInfo.ytdlp.available && toolsInfo.ffmpeg.available) {
       const dir = await ensureTmp()
       try {
@@ -470,7 +588,7 @@ export function apply(ctx) {
           mode: 'audio',
           outDir: dir,
           cookiesPath: cookiePath,
-          userAgent: userAgent || '', 
+          userAgent: userAgent || '',
           referer: 'https://www.douyin.com/',
           ffmpegPath: toolsInfo.ffmpeg.path,
           audioQuality: state.config.mp3Bitrate,
@@ -483,15 +601,43 @@ export function apply(ctx) {
       }
     }
 
-    // 没有 yt-dlp：直接下载视频再抽音频（有 ffmpeg 时）
-    const direct = pickDouyinStream(detail, state.config.maxHeight)
+    // 没有 yt-dlp：抖音原声/背景音乐优先，其次下载视频再抽音频。
+    const musicUrl = String(detail.music?.play_url || '').trim()
+    if (musicUrl && /^https?:\/\//i.test(musicUrl)) {
+      try {
+        const audioRecord = await directDownloadToStore(musicUrl, {
+          headers: await douyinHeaders(userAgent),
+          kind: 'audio',
+          meta: { ...meta, kind: 'audio', ext: 'mp3', mime: 'audio/mpeg', cover: detail.music?.cover || meta.cover },
+          maxBytes: Math.max(1, Number(state.config.maxAudioMB) || 40) * 1024 * 1024,
+        })
+        if (toolsInfo.ffmpeg.available) {
+          const audio = await transcodeRecord(audioRecord, { format: 'mp3', bitrate: state.config.mp3Bitrate, toolsInfo })
+          if (audio.ok) return { ok: true, media: publicRecord(audio.media), quality: '原声' }
+          await removeRecord(dataDir(), audioRecord.id).catch(() => {})
+        } else {
+          return { ok: true, media: publicRecord(audioRecord), degraded: 'no-ffmpeg' }
+        }
+      } catch (error) {
+        ctx.logger.warn(`[media-post] 抖音原声下载失败，改用视频抽音频：${error?.message || error}`)
+      }
+    }
+
+    const direct = pickDouyinStreams(detail, { maxHeight: qualityCap() })[0]?.url || ''
     if (!direct) return fail('NO_VIDEO_URL', '没有从抖音解析到可下载的视频地址。')
-    const videoRecord = await directDownloadToStore(direct, {
-      headers: await douyinHeaders(userAgent),
-      kind: 'video',
-      meta: { ...meta, kind: 'video', ext: 'mp4', mime: 'video/mp4' },
-      maxBytes: Math.max(1, Number(state.config.maxVideoMB) || 150) * 1024 * 1024,
-    })
+    let videoRecord = null
+    try {
+      videoRecord = await directDownloadToStore(direct, {
+        headers: await douyinHeaders(userAgent),
+        kind: 'video',
+        meta: { ...meta, kind: 'video', ext: 'mp4', mime: 'video/mp4', meta: { watermarkFree: true } },
+        maxBytes: videoBytesLimit(),
+      })
+    } catch (error) {
+      return fail('DOWNLOAD_FAILED', `抖音音频提取失败：${error?.message || error}`, {
+        hint: '如果提示「文件超过大小上限」，把「设置 → 点歌台 → 单视频上限(MB)」调大；或先在设置里安装 yt-dlp（可只下载音轨）。',
+      })
+    }
     if (!toolsInfo.ffmpeg.available) {
       // 没有 ffmpeg：把视频当音频记录返回，发送时 NapCat 会尝试按原样发；失败则降级为文件。
       return { ok: true, media: publicRecord(videoRecord), degraded: 'no-ffmpeg' }
@@ -504,35 +650,44 @@ export function apply(ctx) {
   const prepareBilibili = async ({ url, kind, toolsInfo, cookiePath, cookieHeader }) => {
     const bvid = extractBvid(url)
     const metaBase = { source: 'bilibili', platformId: bvid, sourceUrl: url, ext: 'mp4', mime: 'video/mp4' }
+    const isAudio = kind === 'audio'
 
     if (toolsInfo.ytdlp.available) {
       const dir = await ensureTmp()
       try {
         const result = await ytdlpDownload(toolsInfo.ytdlp, {
           url,
-          mode: kind === 'audio' ? 'audio' : 'video',
+          mode: isAudio ? 'audio' : 'video',
           outDir: dir,
           cookiesPath: cookiePath,
-          maxHeight: state.config.maxHeight,
+          maxHeight: qualityCap(),
           ffmpegPath: toolsInfo.ffmpeg.available ? toolsInfo.ffmpeg.path : '',
           audioQuality: state.config.mp3Bitrate,
         })
         if (!result.ok) return fail('DOWNLOAD_FAILED', result.error || 'yt-dlp 下载失败')
-        const isAudio = kind === 'audio'
+        const ext = result.ext || (isAudio ? (toolsInfo.ffmpeg.available ? 'mp3' : 'm4a') : 'mp4')
+        const printed = result.meta || {}
         const record = await saveDownloadedFile(result.file, {
           ...metaBase,
+          title: printed.title || '',
+          author: printed.author || '',
+          duration: printed.duration || 0,
+          sourceUrl: printed.sourceUrl || url,
           kind: isAudio ? 'audio' : 'video',
-          ext: isAudio ? (toolsInfo.ffmpeg.available ? 'mp3' : 'm4a') : 'mp4',
+          ext,
           mime: isAudio ? 'audio/mpeg' : 'video/mp4',
+          ...(isAudio ? {} : { meta: { quality: qualityLabelOf(currentQuality()) } }),
         })
-        return { ok: true, media: publicRecord(record) }
+        if (isAudio) return { ok: true, media: publicRecord(record) }
+        const compat = await ensureCompatVideo(record, toolsInfo, { dropSource: true })
+        return { ok: true, media: publicRecord(compat.record), quality: qualityLabelOf(currentQuality()), transcoded: compat.transcoded || '' }
       } finally {
         await cleanupTmp(dir)
       }
     }
 
     // 原生兜底
-    const resolved = await resolveBilibili({ url, cookieHeader, maxHeight: state.config.maxHeight, mode: kind === 'audio' ? 'audio' : 'video' })
+    const resolved = await resolveBilibili({ url, cookieHeader, maxHeight: qualityCap(), mode: isAudio ? 'audio' : 'video' })
     if (!resolved.ok) return fail('RESOLVE_FAILED', resolved.error || 'B站解析失败')
     const meta = {
       ...metaBase,
@@ -545,10 +700,15 @@ export function apply(ctx) {
     }
     const dir = await ensureTmp()
     try {
-      if (kind === 'audio') {
+      if (isAudio) {
         const source = resolved.audio?.[0]
         if (!source?.url) return fail('NO_AUDIO_URL', 'B站没有返回可下载的音频流。')
-        const downloaded = await downloadDirect(source.url, dir, { cookieHeader, filename: `bili_${resolved.bvid}.m4a`, maxBytes: Math.max(1, Number(state.config.maxAudioMB) || 40) * 1024 * 1024 })
+        const downloaded = await downloadDirect(source.url, dir, {
+          cookieHeader,
+          filename: `bili_${resolved.bvid}.m4a`,
+          backup: source.backup || [],
+          maxBytes: Math.max(1, Number(state.config.maxAudioMB) || 40) * 1024 * 1024,
+        })
         let file = downloaded.file
         let ext = 'm4a'
         let mime = 'audio/mp4'
@@ -561,48 +721,67 @@ export function apply(ctx) {
         return { ok: true, media: publicRecord(record) }
       }
 
-      // 视频：优先 durl 合流 MP4，其次 DASH 视频 + 音频 mux（需要 ffmpeg）
-      if (resolved.durl?.[0]?.url) {
-        const downloaded = await downloadDirect(resolved.durl[0].url, dir, { cookieHeader, filename: `bili_${resolved.bvid}.mp4`, maxBytes: Math.max(1, Number(state.config.maxVideoMB) || 150) * 1024 * 1024 })
-        const record = await saveDownloadedFile(downloaded.file, { ...meta, kind: 'video', ext: 'mp4', mime: 'video/mp4' })
-        return { ok: true, media: publicRecord(record) }
-      }
+      // 视频优先走 DASH（和网页播放器同一套流，原画质）；
+      // 没有 ffmpeg 装不下 DASH 时再退回单文件 durl（音轨齐全、但清晰度较低）。
       const video = resolved.video?.[0]
       const audio = resolved.audio?.[0]
       if (video?.url && audio?.url && toolsInfo.ffmpeg.available) {
-        const v = await downloadDirect(video.url, dir, { cookieHeader, filename: `bili_${resolved.bvid}_v.m4s`, maxBytes: Math.max(1, Number(state.config.maxVideoMB) || 150) * 1024 * 1024 })
-        const a = await downloadDirect(audio.url, dir, { cookieHeader, filename: `bili_${resolved.bvid}_a.m4s`, maxBytes: Math.max(1, Number(state.config.maxAudioMB) || 40) * 1024 * 1024 })
-        const out = join(dir, `bili_${resolved.bvid}.mp4`)
-        const mux = await run(toolsInfo.ffmpeg.path, [
-          '-hide_banner', '-loglevel', 'error', '-y',
-          '-i', v.file, '-i', a.file,
-          '-map', '0:v:0', '-map', '1:a:0',
-          '-c', 'copy', '-movflags', '+faststart', out,
-        ], { timeoutMs: 300000 })
-        const compatible = Number(video.codecid) === 7 && /(mp4a|aac)/i.test(String(audio.codecs || ''))
-        if (mux.code === 0 && compatible) {
-          const record = await saveDownloadedFile(out, { ...meta, kind: 'video', ext: 'mp4', mime: 'video/mp4' })
-          return { ok: true, media: publicRecord(record) }
+        const videoMeta = { ...meta, meta: { quality: video.label || '', watermarkFree: true, vcodec: video.codecs || '' } }
+        const v = await downloadDirect(video.url, dir, {
+          cookieHeader,
+          filename: `bili_${resolved.bvid}_v.m4s`,
+          backup: video.backup || [],
+          maxBytes: videoBytesLimit(),
+        })
+        const a = await downloadDirect(audio.url, dir, {
+          cookieHeader,
+          filename: `bili_${resolved.bvid}_a.m4s`,
+          backup: audio.backup || [],
+          maxBytes: Math.max(1, Number(state.config.maxAudioMB) || 40) * 1024 * 1024,
+        })
+        // 直接封装（copy）后探测：H.264 + AAC 秒级完成；否则统一转码成兼容性最好的 H.264 + AAC。
+        const muxFile = join(dir, `bili_${resolved.bvid}.mp4`)
+        const mux = await remuxVideo(toolsInfo.ffmpeg.path, v.file, a.file, muxFile)
+        if (mux.ok) {
+          const probe = await probeMedia(toolsInfo.ffmpeg.path, muxFile)
+          if (isQqCompatibleVideo(probe)) {
+            const record = await saveDownloadedFile(muxFile, { ...videoMeta, kind: 'video', ext: 'mp4', mime: 'video/mp4' })
+            return { ok: true, media: publicRecord(record), quality: video.label || '' }
+          }
         }
-        // 选到的不是 AVC/AAC（QQ 客户端可能黑屏 / 0:00），或直接封装失败：
-        // 统一转码成兼容性最好的 H.264 + AAC 再发，宁可慢一点，也不发空视频。
+        const limit = transcodeCap()
         const h264File = join(dir, `bili_${resolved.bvid}_h264.mp4`)
-        const transcode = await run(toolsInfo.ffmpeg.path, [
-          '-hide_banner', '-loglevel', 'error', '-y',
-          '-i', v.file, '-i', a.file,
-          '-map', '0:v:0', '-map', '1:a:0',
-          '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p',
-          '-c:a', 'aac', '-b:a', '128k',
-          '-movflags', '+faststart', h264File,
-        ], { timeoutMs: 600000 })
-        if (transcode.code === 0) {
-          const record = await saveDownloadedFile(h264File, { ...meta, kind: 'video', ext: 'mp4', mime: 'video/mp4', meta: { ...(meta.meta || {}), transcoded: 'h264-aac' } })
-          return { ok: true, media: publicRecord(record), transcoded: 'h264-aac' }
+        const transcode = await transcodeVideoH264(toolsInfo.ffmpeg.path, [v.file, a.file], h264File, { maxHeight: limit })
+        if (transcode.ok) {
+          const record = await saveDownloadedFile(h264File, {
+            ...videoMeta,
+            meta: { ...videoMeta.meta, transcoded: `H.264${limit ? `@${limit}P` : ''}` },
+            kind: 'video',
+            ext: 'mp4',
+            mime: 'video/mp4',
+          })
+          return { ok: true, media: publicRecord(record), quality: video.label || '', transcoded: `h264${limit ? `@${limit}P` : ''}` }
         }
-        const detail = String(transcode.stderr || transcode.error || mux.stderr || mux.error || '').trim().slice(0, 300)
+        const detail = String(transcode.error || mux.error || '').trim().slice(0, 300)
         return fail('VIDEO_TRANSCODE_FAILED', `视频流既不能直接封装，也转码失败：${detail || '未知错误'}`, { hint: '可尝试更新 ffmpeg，或在设置里配置 yt-dlp 后重试。' })
       }
-      return fail('NO_VIDEO_STREAM', '没有拿到可用的 B站视频流（可尝试安装 yt-dlp 或 ffmpeg 后重试）。')
+
+      const durl = resolved.durl?.[0]
+      if (durl?.url) {
+        const downloaded = await downloadDirect(durl.url, dir, {
+          cookieHeader,
+          filename: `bili_${resolved.bvid}.mp4`,
+          backup: durl.backup || [],
+          maxBytes: videoBytesLimit(),
+        })
+        const record = await saveDownloadedFile(downloaded.file, { ...meta, kind: 'video', ext: 'mp4', mime: 'video/mp4' })
+        return { ok: true, media: publicRecord(record) }
+      }
+      return fail('NO_VIDEO_STREAM', '没有拿到可用的 B站视频流（装好 ffmpeg 才能合并浏览器同款 DASH 原画，或安装 yt-dlp 后重试）。')
+    } catch (error) {
+      return fail('DOWNLOAD_FAILED', `B站媒体下载失败：${error?.message || error}`, {
+        hint: '如果提示「文件超过大小上限」，把「设置 → 点歌台 → 视频画质」调低，或把「单视频上限(MB)」调大。',
+      })
     } finally {
       await cleanupTmp(dir)
     }
@@ -825,6 +1004,7 @@ export function apply(ctx) {
       ok: true,
       dataDir: dataDir(),
       config: { ...state.config },
+      qualityLabel: qualityLabelOf(currentQuality()),
       tools: {
         ffmpeg: info.ffmpeg,
         ytdlp: info.ytdlp,
@@ -876,9 +1056,22 @@ export function apply(ctx) {
     const allowed = Object.keys(DEFAULT_CONFIG)
     for (const key of allowed) {
       if (body[key] === undefined) continue
-      if (typeof DEFAULT_CONFIG[key] === 'number') state.config[key] = Number(body[key]) || DEFAULT_CONFIG[key]
-      else state.config[key] = String(body[key] ?? '')
+      if (typeof DEFAULT_CONFIG[key] === 'number') {
+        // 0 是合法值（例如 transcodeMaxHeight=0 表示转码不降级），不能用 `|| 默认值` 吃掉。
+        const value = Number(body[key])
+        state.config[key] = Number.isFinite(value) ? value : DEFAULT_CONFIG[key]
+      } else {
+        state.config[key] = String(body[key] ?? '')
+      }
     }
+    // 画质只接受 best / 具体高度（例如 1080），其它值一律回退到原画质。
+    const quality = String(state.config.videoQuality || 'best').trim().toLowerCase()
+    const height = Number(quality)
+    state.config.videoQuality = quality === 'best' || !quality
+      ? 'best'
+      : Number.isFinite(height) && height > 0
+        ? String(Math.max(240, Math.min(2160, Math.round(height))))
+        : 'best'
     schedulePersist()
     toolCache = { at: 0, value: null }
     httpApi.sendJson(res, 200, { ok: true, config: { ...state.config } })
