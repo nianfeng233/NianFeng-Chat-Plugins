@@ -29,7 +29,7 @@
  */
 
 export const name = 'napcat-group-guard'
-export const version = '2.0.8'
+export const version = '2.0.9'
 export const scope = 'both'
 export const displayName = '群管助手'
 export const description = '扩展 · NapCat 群自动管理：仅响应显式配置的群；入群申请自动审核（白词优先于黑词、等级 / 共享黑名单）、申请 / 进出群档案图与定时清理不活跃成员；退群 / 被踢与自动拉黑合并为一条提示；档案图服务端渲染，不需要 WebUI 页面常驻。'
@@ -757,7 +757,7 @@ export function apply(ctx) {
         if (cleanupOverride.dailyBroadcastMinute !== undefined) rule.cleanup.dailyBroadcastMinute = clampNumber(cleanupOverride.dailyBroadcastMinute, 0, 59, rule.cleanup.dailyBroadcastMinute, { integer: true })
         if (cleanupOverride.dailyMessage !== undefined) rule.cleanup.dailyMessage = String(cleanupOverride.dailyMessage ?? rule.cleanup.dailyMessage)
         if (cleanupOverride.nextMessage !== undefined) rule.cleanup.nextMessage = String(cleanupOverride.nextMessage ?? rule.cleanup.nextMessage)
-        if (cleanupOverride.rejectAdd !== undefined) rule.kickRejectAdd = toBool(cleanupOverride.rejectAdd, rule.kickRejectAdd)
+        // 不活跃清退固定 reject_add_request=false；不再支持用 cleanup.rejectAdd 改写全局踢人开关。
       }
 
       const flatCleanup = {
@@ -1079,7 +1079,7 @@ export function apply(ctx) {
    * 踢一个群成员。会做硬性保护：自己、群主、保护名单；并自动携带
    * reject_add_request（是否把对方加入 QQ 自己的「拒绝再次加群」名单）。
    */
-  async function kickMember(instanceId, groupId, qq, { rule = null, reason = '', source = 'manual' } = {}) {
+  async function kickMember(instanceId, groupId, qq, { rule = null, reason = '', source = 'manual', rejectAdd: rejectAddOverride } = {}) {
     const target = normalizeQq(qq)
     const gid = normalizeQq(groupId)
     if (!instanceId || !gid || !target) return { ok: false, error: '缺少 instanceId / groupId / qq。' }
@@ -1093,7 +1093,10 @@ export function apply(ctx) {
     const member = normalizeMember(info.data)
     if (member.role === 'owner') return { ok: false, skipped: true, qq: target, groupId: gid, error: '目标是群主，无法踢出。' }
 
-    const rejectAdd = rule?.kickRejectAdd !== undefined ? toBool(rule.kickRejectAdd, kickRejectAdd()) : kickRejectAdd()
+    let rejectAdd
+    if (rejectAddOverride !== undefined) rejectAdd = toBool(rejectAddOverride, false)
+    else if (rule?.kickRejectAdd !== undefined) rejectAdd = toBool(rule.kickRejectAdd, kickRejectAdd())
+    else rejectAdd = kickRejectAdd()
     // 清理踢人要在 action 前打标记，避免 NapCat 的 group_decrease 事件比响应先到而被当成“被踢自动拉黑”。
     // 标记同时写入后端租约：多页面同时在线时，处理 group_decrease 的那个页面也能识别出这是清理踢人。
     if (source === 'cleanup') {
@@ -3130,6 +3133,8 @@ export function apply(ctx) {
         rule: target.rule,
         reason: '清理不活跃成员',
         source: 'cleanup',
+        // 不活跃清退固定不写 QQ 官方「拒绝再次加群」名单，避免被清退的人之后无法重新申请。
+        rejectAdd: false,
       })
       if (result.ok) kicked.push(publicMember(member))
       else failed.push({ qq: member.qq, display: member.display, error: result.error })

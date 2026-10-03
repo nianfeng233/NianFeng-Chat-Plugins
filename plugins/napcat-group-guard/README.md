@@ -37,7 +37,7 @@
 | 主动退群自动拉黑 | 监听 `group_decrease(leave)`，可用 `autoBlacklistOnLeave` 关闭 |
 | 多群共用黑名单 | 每个群可配 `blacklistId`，多个群填同一个名字即共用；默认名单是 `default` |
 | 拉黑后尚未踢出 | 加入黑名单后自动扫描该名单关联的群，仍在群里则立即踢出 |
-| 踢人时加入 QQ 黑名单 | `kickRejectAdd` 控制 `set_group_kick` 的 `reject_add_request`（QQ 自己的「拒绝再次加群」） |
+| 踢人时加入 QQ 黑名单 | `kickRejectAdd` 控制黑名单联动 / 普通自动踢人的 `reject_add_request`（QQ 自己的「拒绝再次加群」）；**定时清理固定 false，不写 QQ 官方黑名单** |
 | 申请群内提示 | 处理后在群里发送纯文字：昵称、QQ、等级、进群回答、处理结果；模板可自定义。申请提示不带图 |
 | 黑名单申请静默 | 如果申请人已在黑名单中，只快速拒绝，不再往群里推进群通知，避免反复申请刷屏 |
 | 进群成功欢迎 | `group_increase` 时发送欢迎语（默认 @ 新成员），模板可自定义 |
@@ -67,7 +67,7 @@
 2. 到 18:00 时拉取群成员列表；
 3. 以 `last_sent_time`（从未发言则退化为 `join_time`）判断活跃时间，超过该群 `cleanup.inactiveDays` 天的成员批量踢出；
 4. 自动跳过机器人自己、群主、管理员（可配）、保护名单、机器人账号、活跃时间未知的成员；
-5. `cleanup.blacklistKicked` 控制清理踢出的人是否自动加入黑名单（默认关闭）；
+5. 清理踢人固定 `reject_add_request=false`，不会把被清退成员加入 QQ 官方「拒绝再次加群」名单；`cleanup.blacklistKicked` 只控制是否同时加入插件自己的黑名单（默认关闭）；
 6. `cleanup.notifyResult` 控制清理完成后是否在群里播报踢人结果；
 7. 每轮批量踢完后，会播报下一轮清理时间与剩余天数（`cleanup.nextMessage`，支持 `{next_date}` / `{days}` / `{days_text}`）；
 8. 每天约 `cleanup.dailyBroadcastHour:cleanup.dailyBroadcastMinute`（默认 20:00）自动播报下一轮清人日期、当前预计清理人数和剩余天数（`cleanup.dailyMessage` 新增 `{count}`）；服务端代聊常驻，20:00 后再启动 / 刷新 WebUI 也会补播一次，多实例通过后端租约保证每天每群只播一次。
@@ -111,7 +111,7 @@ powershell -ExecutionPolicy Bypass -File .\extensions\napcat-group-guard\install
 ### 方式 C：上传 zip 安装
 
 在 设置 → 插件 →「外部插件目录」一行点 **添加插件**，选择本目录下的
-`napcat-group-guard-v2.0.8.zip`；上传成功后插件会自动解压到服务器端外部插件目录，
+`napcat-group-guard-v2.0.9.zip`；上传成功后插件会自动解压到服务器端外部插件目录，
 按提示刷新页面即可。
 
 > 注意：zip 内已经是插件根目录结构（`napcat-group-guard/index.mjs` 等），不要再手动套一层文件夹。
@@ -127,7 +127,7 @@ powershell -ExecutionPolicy Bypass -File .\extensions\napcat-group-guard\install
 node extensions\napcat-group-guard\test.mjs
 ```
 
-113 项断言覆盖（含无 WebUI / 无 PowerShell 的服务端渲染、固定 18:00 对齐、每日预计清理人数、白词优先于黑词）：等级 / 隐藏等级 / 白词 / 黑词 / 连续拒绝拉黑、黑名单工具增删查踢、
+114 项断言覆盖（含无 WebUI / 无 PowerShell 的服务端渲染、固定 18:00 对齐、每日预计清理人数、白词优先于黑词、清理固定不写 QQ 官方黑名单）：等级 / 隐藏等级 / 白词 / 黑词 / 连续拒绝拉黑、黑名单工具增删查踢、
 共享黑名单、黑名单申请静默、申请 / 进群 / 退群档案图、只响应已配置群、退群 / 被踢 / 拉黑提示、头像代理与多页面租约、
 重复投递只处理一次、老成员旧 `group_increase` 重放不重复欢迎、同一次入群按 `join_time` 持久化幂等、启动补扫、按群覆盖规则、设置面板按群下拉表单、定时清理预告与批量踢人、
 清理结束后的下一轮播报、模型 cleanup_trigger 立即触发、每日 20:00 播报、演练模式、补偿轮询、
@@ -241,7 +241,7 @@ node extensions\napcat-group-guard\test.mjs
 | `napcat.groupGuard.cleanup.warnMinutes` | `10` | 发预告后等待多少分钟开始踢人 |
 | `napcat.groupGuard.cleanup.inactiveDays` | `30` | 超过多少天未活跃视为不活跃 |
 | `napcat.groupGuard.cleanup.skipAdmins` | `true` | 跳过管理员（群主始终跳过） |
-| `napcat.groupGuard.cleanup.blacklistKicked` | `false` | 清理踢出的人是否加入黑名单 |
+| `napcat.groupGuard.cleanup.blacklistKicked` | `false` | 清理踢出的人是否加入插件自己的黑名单；QQ 官方「拒绝再次加群」名单始终不写 |
 | `napcat.groupGuard.cleanup.notifyResult` | `false` | 清理完成后是否播报结果 |
 | `napcat.groupGuard.cleanup.groups` | 空 | 限定清理群号 / 群名；空 = 所有已配置群聊渠道 |
 | `napcat.groupGuard.cleanup.message` | 见代码 | 预告文案模板 |
@@ -332,4 +332,5 @@ guard.pollRequests()                           // 手动触发一次积压申请
 - v2.0.6：修复 v2.0.5 的 `index.mjs` 导出版本号仍停留在 2.0.4、而 manifest 已升到 2.0.5，导致插件市场安装成功后仍显示「本地 2.0.4 / 可更新」的问题；导出版本号与 manifest 版本现已统一。
 - v2.0.7：进群白词优先于黑词；同一回答同时命中白词和黑词时按白词放行。
 - v2.0.8：修复清理周期超过 24.85 天（如 30 天 / 43200 分钟）时 `setTimeout` 溢出，导致 `TimeoutOverflowWarning` 刷屏和空转的问题；超长清理周期现在会自动分段等待。
+- v2.0.9：不活跃清理踢人固定 `reject_add_request=false`，不再把被清退成员加入 QQ 官方「拒绝再次加群」名单；全局 `kickRejectAdd` 仍作用于黑名单联动 / 普通自动踢人。
 
