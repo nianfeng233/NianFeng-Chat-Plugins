@@ -29,7 +29,7 @@
  */
 
 export const name = 'napcat-group-guard'
-export const version = '2.0.7'
+export const version = '2.0.8'
 export const scope = 'both'
 export const displayName = '群管助手'
 export const description = '扩展 · NapCat 群自动管理：仅响应显式配置的群；入群申请自动审核（白词优先于黑词、等级 / 共享黑名单）、申请 / 进出群档案图与定时清理不活跃成员；退群 / 被踢与自动拉黑合并为一条提示；档案图服务端渲染，不需要 WebUI 页面常驻。'
@@ -2584,6 +2584,42 @@ export function apply(ctx) {
   const cleanupKickTimers = new Map()
   let lastCleanupReport = null
   let cleanupDailyTickBusy = false
+  // Node / Chromium 的 setTimeout 延时上限为 2^31-1 毫秒（约 24.85 天）。
+  // 清理周期最长可配到一年，直接按 fireAt-now 传给 ctx.setTimeout 时，
+  // 超过上限会被强制改成 1ms 并打印 TimeoutOverflowWarning，造成日志刷屏。
+  // 这里把超长延时拆成多段，按绝对时间 targetAt 续等，避免溢出。
+  const MAX_TIMEOUT_MS = 2147483647
+
+  function setLongTimeout(callback, delayMs) {
+    const raw = Number(delayMs)
+    const initial = Number.isFinite(raw) ? Math.max(1000, raw) : 1000
+    const targetAt = Date.now() + initial
+    const handle = { timer: null, cleared: false }
+    const arm = () => {
+      if (handle.cleared) return
+      const remain = targetAt - Date.now()
+      if (remain <= 0) {
+        handle.timer = null
+        callback()
+        return
+      }
+      handle.timer = ctx.setTimeout(() => {
+        handle.timer = null
+        arm()
+      }, Math.min(remain, MAX_TIMEOUT_MS))
+    }
+    arm()
+    return handle
+  }
+
+  function clearLongTimeout(handle) {
+    if (!handle) return
+    handle.cleared = true
+    if (handle.timer != null) {
+      ctx.clearTimeout(handle.timer)
+      handle.timer = null
+    }
+  }
 
   const cleanupKey = (instanceId, groupId) => `${normalizeQq(instanceId)}:${normalizeQq(groupId)}`
 
@@ -2884,7 +2920,7 @@ export function apply(ctx) {
     writePendingCleanups(pending)
     const timer = cleanupKickTimers.get(key)
     if (timer) {
-      ctx.clearTimeout(timer)
+      clearLongTimeout(timer)
       cleanupKickTimers.delete(key)
     }
     await executePendingKick(key)
@@ -2940,8 +2976,8 @@ export function apply(ctx) {
 
   function schedulePendingKick(key, kickAt) {
     const existing = cleanupKickTimers.get(key)
-    if (existing) ctx.clearTimeout(existing)
-    const timer = ctx.setTimeout(() => {
+    if (existing) clearLongTimeout(existing)
+    const timer = setLongTimeout(() => {
       cleanupKickTimers.delete(key)
       executePendingKick(key).catch(err => ctx.logger.error(`[napcat-group-guard] 群 ${key} 清理踢人失败：${err?.message || err}`))
     }, Math.max(1000, Number(kickAt) - Date.now()))
@@ -3306,7 +3342,7 @@ export function apply(ctx) {
 
   function scheduleNextCleanup(delayMs) {
     if (cleanupTimer) {
-      ctx.clearTimeout(cleanupTimer)
+      clearLongTimeout(cleanupTimer)
       cleanupTimer = null
     }
     const targets = resolveCleanupTargets()
@@ -3323,7 +3359,7 @@ export function apply(ctx) {
       if (fireAt <= Date.now()) fireAt = Date.now() + 5000
     }
     nextCleanupAt = fireAt
-    cleanupTimer = ctx.setTimeout(() => {
+    cleanupTimer = setLongTimeout(() => {
       cleanupTimer = null
       runCleanupCycle({ source: 'auto' }).catch(err => ctx.logger.error(`[napcat-group-guard] 定时清理执行失败：${err?.message || err}`))
     }, Math.max(1000, fireAt - Date.now()))
@@ -4092,7 +4128,7 @@ export function apply(ctx) {
       resumePendingCleanup().catch(() => {})
       refreshCleanupSchedule()
     } else {
-      for (const timer of cleanupKickTimers.values()) ctx.clearTimeout(timer)
+      for (const timer of cleanupKickTimers.values()) clearLongTimeout(timer)
       cleanupKickTimers.clear()
       writePendingCleanups({})
       writeState({ pendingCleanup: null })
