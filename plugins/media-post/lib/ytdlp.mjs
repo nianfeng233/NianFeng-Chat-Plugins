@@ -14,6 +14,9 @@ import { libUrl } from './rev.mjs'
 
 const { run } = await import(libUrl('tools.mjs'))
 
+/** yt-dlp `--print before_dl:` 的元数据标记，构造参数 / 下载 / 解析必须共用同一常量。 */
+const DEFAULT_META_PREFIX = '__MP_META__'
+
 function launcher(tool) {
   if (!tool?.available) return null
   if (tool.kind === 'python') {
@@ -78,7 +81,7 @@ export function buildDownloadArgs({
   audioQuality = '96K',
   outputTemplate = 'media.%(ext)s',
   withMeta = true,
-  metaPrefix = '__MP_META__',
+  metaPrefix = DEFAULT_META_PREFIX,
 } = {}) {
   const extra = withMeta
     ? ['--print', 'after_move:filepath', '--print', `before_dl:${metaPrefix}%(title)s||%(uploader)s||%(duration)s||%(webpage_url)s`]
@@ -124,13 +127,14 @@ export async function download(tool, {
   ffmpegPath = '',
   timeoutMs = 1800000,
   audioQuality = '96K',
+  metaPrefix = DEFAULT_META_PREFIX,
   onProgress,
 } = {}) {
   const ext = mode === 'audio' && ffmpegPath ? 'mp3' : mode === 'video' && ffmpegPath ? 'mp4' : 'orig'
   const suffix = ext === 'orig' ? '%(ext)s' : ext
   const outputTemplate = join(outDir, `dl_${Date.now().toString(36)}_%(id)s.${suffix}`)
   const build = withMeta =>
-    buildDownloadArgs({ url, mode, cookiesPath, userAgent, referer, maxHeight, ffmpegPath, audioQuality, outputTemplate, withMeta })
+    buildDownloadArgs({ url, mode, cookiesPath, userAgent, referer, maxHeight, ffmpegPath, audioQuality, outputTemplate, withMeta, metaPrefix })
 
   let result = await runYtDlp(tool, build(true), { timeoutMs, cwd: outDir, onProgress })
   // 老版本 yt-dlp 可能不认 before_dl: 前缀：去掉元数据打印重试一次，别为了标题把下载搞挂。
@@ -171,7 +175,7 @@ export async function download(tool, {
 }
 
 /** 解析 `--print before_dl:__MP_META__标题||作者||时长||链接` 那一行（纯函数，方便单测）。 */
-export function parsePrintedMeta(stdout, prefix = '__MP_META__') {
+export function parsePrintedMeta(stdout, prefix = DEFAULT_META_PREFIX) {
   const line = String(stdout || '')
     .split('\n')
     .map(item => item.trim())
